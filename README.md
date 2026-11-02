@@ -48,6 +48,13 @@ Kafka UI까지 보고 싶으면 `--profile tools`를 붙이면 됩니다(http://
 | coupon-worker | 8082 | http://localhost:8082/actuator/health |
 | simulator | 8090 | http://localhost:8090/actuator/health |
 
+**테스트** (`backend/` 폴더에서)
+
+```bash
+./gradlew test                          # 단위 테스트
+./gradlew :coupon-api:integrationTest   # 동시성 테스트 (인프라 실행 필요, coupon_test DB 사용)
+```
+
 **3. 프론트엔드**
 
 ```bash

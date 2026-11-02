@@ -17,7 +17,8 @@ spring:
   jpa:
     open-in-view: false
     hibernate:
-      ddl-auto: none
+      # 스키마는 Flyway(db/migration)가 만들고, JPA는 엔티티와 맞는지만 확인한다
+      ddl-auto: validate
   data:
     redis:
       host: ${REDIS_HOST:localhost}

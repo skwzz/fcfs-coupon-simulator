@@ -1,0 +1,15 @@
+# 통합 테스트 전용. 개발 데이터(coupon)와 섞이지 않게 같은 Docker MySQL의 coupon_test DB를 쓴다.
+# DB를 자동으로 만들 수 있도록 root 계정을 쓴다 (로컬 Docker 전용 계정).
+spring:
+  datasource:
+    url: jdbc:mysql://localhost:3306/coupon_test?createDatabaseIfNotExist=true&serverTimezone=Asia/Seoul&characterEncoding=UTF-8
+    username: root
+    password: root
+    hikari:
+      maximum-pool-size: 20
+
+coupon:
+  issue:
+    optimistic:
+      # 테스트는 "재시도 초과로 인한 실패" 없이 정합성만 보려고 넉넉하게 둔다
+      max-retries: 1000
