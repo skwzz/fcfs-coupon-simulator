@@ -5,8 +5,8 @@
 
 ## Phase 0. 뼈대
 - [x] `frontend` 목업 (React + Vite + TS, 가짜 데이터)
-- [ ] `infra/docker-compose.yml` (MySQL, Redis(AOF), Kafka)
-- [ ] `backend` Gradle 멀티모듈: `common`, `coupon-api`, `coupon-worker`, `simulator`
+- [x] `infra/docker-compose.yml` (MySQL, Redis(AOF), Kafka)
+- [x] `backend` Gradle 멀티모듈: `common`, `coupon-api`, `coupon-worker`, `simulator`
 - **완료 기준**: 인프라를 띄우고, 네 모듈이 각각 실행되어 헬스체크 OK
 
 ## Phase 1. 문제를 눈으로 보기 (NAIVE + DB 락)

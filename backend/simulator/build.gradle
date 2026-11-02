@@ -1,0 +1,9 @@
+// 시뮬레이션 실행기, 가상 사용자 행동 모델, 지표 집계, SSE
+apply plugin: 'org.springframework.boot'
+
+dependencies {
+	implementation project(':common')
+	implementation 'org.springframework.boot:spring-boot-starter-webmvc'
+	implementation 'org.springframework.boot:spring-boot-starter-actuator'
+	implementation 'org.springframework.boot:spring-boot-starter-validation'
+}

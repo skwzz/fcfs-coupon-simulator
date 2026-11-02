@@ -1,0 +1,2 @@
+// 도메인 모델, DTO, Redis 키, Kafka 메시지 정의 (실행 앱이 아닌 라이브러리)
+apply plugin: 'java-library'

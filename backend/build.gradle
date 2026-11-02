@@ -1,0 +1,52 @@
+plugins {
+	id 'org.springframework.boot' version '4.1.2' apply false
+	id 'io.spring.dependency-management' version '1.1.7' apply false
+}
+
+subprojects {
+	apply plugin: 'java'
+	apply plugin: 'io.spring.dependency-management'
+
+	group = 'com.skwzz.fcfs'
+	version = '0.0.1-SNAPSHOT'
+
+	java {
+		toolchain {
+			languageVersion = JavaLanguageVersion.of(21)
+		}
+	}
+
+	repositories {
+		mavenCentral()
+	}
+
+	dependencyManagement {
+		imports {
+			mavenBom org.springframework.boot.gradle.plugin.SpringBootPlugin.BOM_COORDINATES
+		}
+	}
+
+	dependencies {
+		compileOnly 'org.projectlombok:lombok'
+		annotationProcessor 'org.projectlombok:lombok'
+		testCompileOnly 'org.projectlombok:lombok'
+		testAnnotationProcessor 'org.projectlombok:lombok'
+		testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+	}
+
+	tasks.withType(JavaCompile).configureEach {
+		options.encoding = 'UTF-8'
+		options.compilerArgs << '-parameters'
+	}
+
+	tasks.named('test') {
+		useJUnitPlatform()
+	}
+
+	// 실행 앱은 bootJar만 만든다 (-plain.jar 생략)
+	plugins.withId('org.springframework.boot') {
+		tasks.named('jar') {
+			enabled = false
+		}
+	}
+}
