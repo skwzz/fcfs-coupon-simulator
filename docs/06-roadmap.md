@@ -10,10 +10,11 @@
 - **완료 기준**: 인프라를 띄우고, 네 모듈이 각각 실행되어 헬스체크 OK
 
 ## Phase 1. 문제를 눈으로 보기 (NAIVE + DB 락)
-- [ ] CouponEvent / CouponIssue 엔티티, 이벤트 생성/초기화/검증 API
-- [ ] `IssueStrategy` 인터페이스 + `NAIVE`, `SYNCHRONIZED`, `DB_PESSIMISTIC`, `DB_OPTIMISTIC`
-- [ ] 동시성 테스트 (JUnit + `ExecutorService` + `CountDownLatch`)
+- [x] CouponEvent / CouponIssue 엔티티 (Flyway로 스키마 관리), 이벤트 생성/초기화/검증 API
+- [x] `IssueStrategy` 인터페이스 + `NAIVE`, `SYNCHRONIZED`, `DB_PESSIMISTIC`, `DB_OPTIMISTIC`
+- [x] 동시성 테스트 (JUnit + `ExecutorService` + `CountDownLatch`), `./gradlew :coupon-api:integrationTest`
 - **완료 기준**: 테스트로 NAIVE의 초과 발급을 재현하고, 락 전략은 통과
+- **결과** (1,000명 동시 요청, 재고 100): NAIVE는 1,000장 전부 발급(초과 900, 카운터는 갱신 손실로 50). 락 전략 3개는 정확히 100장
 
 ## Phase 2. 시뮬레이터 + 대시보드 연결
 - [ ] `simulator` 앱: 가상 사용자(Virtual Thread, 실제 HTTP), HdrHistogram, 실행/중단 API

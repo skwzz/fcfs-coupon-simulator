@@ -18,12 +18,15 @@
 
 ```jsonc
 // POST /events
-{ "name": "11월 선착순 100장", "totalQuantity": 100, "perUserLimit": 1,
+// name, totalQuantity, strategy만 필수. 나머지 기본값: queueEnabled=false, admitPerSecond=200, uniqueConstraintEnabled=true
+{ "name": "11월 선착순 100장", "totalQuantity": 100,
   "strategy": "REDIS_ATOMIC", "queueEnabled": true, "admitPerSecond": 200,
   "uniqueConstraintEnabled": true }
 
 // GET /events/{id}/verification
-{ "totalQuantity": 100, "issuedInDb": 137, "overIssued": 37, "duplicateIssued": 12, "passed": false }
+// issuedQuantityCounter: 이벤트의 발급 카운터. NAIVE에서는 갱신 손실 때문에 실제 발급 행 수보다 작게 남는다
+{ "totalQuantity": 100, "issuedInDb": 137, "issuedQuantityCounter": 52,
+  "overIssued": 37, "duplicateIssued": 12, "passed": false }
 ```
 
 ## 2. 발급
@@ -43,7 +46,11 @@
 | 409 | `DUPLICATE` | 이미 발급받음 |
 | 410 | `SOLD_OUT` | 재고 소진 |
 | 403 | `NOT_ADMITTED` | 대기열 사용 이벤트인데 입장 토큰이 없거나 만료됨 |
-| 503 | `ERROR` | 락 타임아웃 등 (`reason` 필드 포함) |
+| 503 | `ERROR` | 락 타임아웃, 낙관적 락 재시도 초과(`OPTIMISTIC_RETRY_EXCEEDED`) 등 (`reason` 필드 포함) |
+| 400 | (ProblemDetail) | `X-User-Id` 헤더 없음, 아직 구현되지 않은 전략 |
+| 404 | (ProblemDetail) | 이벤트 없음 |
+
+`?strategy=DB_OPTIMISTIC`처럼 쿼리 파라미터를 주면 이벤트의 기본 전략 대신 그 전략으로 실행합니다.
 
 ```json
 { "result": "SOLD_OUT", "reason": null, "issuedAt": null }

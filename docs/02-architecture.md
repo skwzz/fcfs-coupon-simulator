@@ -98,13 +98,14 @@ fcfs-coupon-simulator/
 CouponEvent                         CouponIssue
 ─────────────────────────           ─────────────────────────
 id            PK                    id          PK
-name                                event_id    FK
+name                                event_id    (FK 없음, 대량 insert 고려)
 total_quantity                      user_id
 issued_quantity  (DB 전략용)        issued_at
 version          (낙관적 락용)      strategy
-per_user_limit                      request_id  (멱등 키, Kafka 경로)
-queue_enabled                       UNIQUE(event_id, user_id)  ← 최후 방어선
-admit_per_second
+strategy         (기본 전략)        request_id  (멱등 키, Kafka 경로)
+queue_enabled                       dup_guard   (제약 우회용, 아래 참고)
+admit_per_second                    UNIQUE(event_id, user_id, dup_guard)  ← 최후 방어선
+unique_constraint_enabled
 start_at
 
 SimulationRun                       SimulationUserResult (선택: 상세 저장 시)
@@ -118,8 +119,11 @@ started_at, finished_at
 result_json   (TPS, p50/95/99, 결과별 건수, 초과/중복 발급 수)
 ```
 
-> `UNIQUE(event_id, user_id)` 제약은 일부러 **옵션으로 끌 수 있게** 만듭니다.
+> 중복 방지 제약은 이벤트마다 **끌 수 있게** 만듭니다(`unique_constraint_enabled`).
 > 제약이 켜져 있으면 중복 발급이 DB 예외로 가려져서, "락 없는 구현"이 어떻게 깨지는지 보이지 않기 때문입니다.
+> DB 제약은 이벤트별로 켜고 끌 수 없어서, 제약을 끈 이벤트는 발급 행마다 다른 `dup_guard` 값을 넣어 우회합니다. 켠 이벤트는 항상 0이라 `(event_id, user_id)` 중복이 막힙니다.
+>
+> 발급 한도는 **1인 1매로 고정**합니다. 한도를 늘리면 위의 제약 방식과 맞지 않고, 선착순 쿠폰은 대부분 1인 1매이기 때문입니다.
 
 ## 5. Redis 키 설계
 
