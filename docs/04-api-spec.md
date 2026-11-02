@@ -1,7 +1,11 @@
 # 04. API & 실시간 이벤트 명세
 
-Base URL: `http://localhost:8080/api`
-사용자 식별은 인증 없이 `X-User-Id` 헤더로 합니다(시뮬레이터가 생성).
+| 서비스 | Base URL | 다루는 API |
+|---|---|---|
+| coupon-api (nginx 경유) | `http://localhost:8080/api` | 1~3장: 쿠폰 이벤트, 발급, 대기열 |
+| simulator | `http://localhost:8090/api` | 4~5장: 시뮬레이션 실행, 실시간 스트림 |
+
+사용자 식별은 인증 없이 `X-User-Id` 헤더로 합니다(시뮬레이터가 생성). 서명된 토큰으로 바꾸는 작업은 [확장 백로그](07-backlog.md)에 있습니다.
 
 ## 1. 쿠폰 이벤트
 
@@ -28,7 +32,9 @@ Base URL: `http://localhost:8080/api`
 |---|---|---|
 | `POST` | `/events/{eventId}/issue` | 쿠폰 발급 요청 |
 
-요청 헤더: `X-User-Id`, (대기열 사용 시) `X-Queue-Token`
+요청 헤더: `X-User-Id`, `X-Request-Id`(멱등 키, 재시도 시 같은 값), (대기열 사용 시) `X-Queue-Token`
+
+응답 헤더: 어느 API 인스턴스가 처리했는지 `X-Served-By`(예: `coupon-api-2`). 부하 분산이 되는지 확인하는 용도입니다.
 
 | HTTP | `result` | 의미 |
 |---|---|---|
@@ -79,12 +85,27 @@ Base URL: `http://localhost:8080/api`
   "strategy": "DB_PESSIMISTIC",
   "queueEnabled": false,
   "userCount": 5000,
-  "requestsPerUser": 1,         // 2 이상이면 연타(중복 요청) 시나리오
   "rampUpMs": 0,                // 0 = 모두 동시에 출발 (CountDownLatch)
   "queueNotifyMode": "SSE",     // SSE | POLLING
-  "trackedUserLimit": 2000      // 개별 상태를 스트리밍할 최대 사용자 수
+  "trackedUserLimit": 2000,     // 개별 상태를 스트리밍할 최대 사용자 수
+  "behavior": {                 // 사용자 행동 모델. preset만 주면 나머지는 프리셋 값
+    "preset": "REALISTIC",      // IDEAL | REALISTIC | AGGRESSIVE
+    "thinkTimeMs": [0, 300],    // 버튼 누르기까지 걸리는 시간 (균등분포 범위)
+    "multiClick": { "ratio": 0.2, "clicks": 3 },          // 20%가 3번 연타
+    "retry": { "maxRetries": 2, "backoffMs": 500, "jitter": true },
+    "refreshWhileWaiting": { "ratePerMinute": 0.1 },      // 대기 중 새로고침 (순번 뒤로)
+    "abandon": { "medianWaitSec": 60 },                   // 대기 시간이 길수록 이탈 확률 증가
+    "polling": { "intervalMs": 1000, "jitterMs": 300 }
+  }
 }
 ```
+
+| 항목 | `IDEAL` | `REALISTIC` | `AGGRESSIVE` |
+|---|---|---|---|
+| 연타 | 없음 | 20%가 3번 | 60%가 5번 |
+| 재시도 | 없음 | 2회, 백오프 500ms + 지터 | 5회, 백오프 없음 |
+| 새로고침 | 없음 | 분당 0.1회 | 분당 0.5회 |
+| 이탈 | 없음 | 대기 중앙값 60초 | 없음 (끝까지 버팀) |
 
 ## 5. 실시간 SSE 이벤트 포맷 (`/simulations/{runId}/stream`)
 
@@ -96,12 +117,14 @@ Base URL: `http://localhost:8080/api`
   "t": 3200,
   "stockLeft": 12,
   "counts": { "IDLE": 0, "REQUESTING": 310, "WAITING": 4100, "ADMITTED": 40,
-              "ISSUED": 88, "SOLD_OUT": 450, "DUPLICATE": 0, "ERROR": 12 },
+              "ISSUED": 88, "SOLD_OUT": 450, "DUPLICATE": 0, "ERROR": 12, "ABANDONED": 3 },
   "tps": 1840,
   "latencyMs": { "p50": 12, "p95": 85, "p99": 230 },
   "queueLength": 4100,
-  "retries": 0,
-  "kafkaLag": 0
+  "retries": 37,
+  "kafkaLag": 0,
+  "servedBy": { "coupon-api-1": 921, "coupon-api-2": 919 },
+  "server": { "hikariPending": 4, "hikariActive": 10 }
 }
 ```
 
@@ -114,6 +137,7 @@ Base URL: `http://localhost:8080/api`
 ### `done`: 종료 + 최종 결과
 ```json
 { "durationMs": 8123, "verification": { "issuedInDb": 100, "overIssued": 0, "duplicateIssued": 0, "passed": true },
+  "reconciliation": { "insertedToDb": 0, "restoredToRedis": 0, "stockRecomputed": false },
   "latencyMs": { "p50": 14, "p95": 90, "p99": 260, "max": 1203 }, "avgTps": 615 }
 ```
 
@@ -124,6 +148,12 @@ IDLE ──▶ REQUESTING ──┬───────────────
                       │                                 SOLD_OUT / DUPLICATE / ERROR
                       │ (대기열 ON)
                       └──▶ WAITING(rank↓) ──▶ ADMITTED ──▶ (위와 같음)
-                               │
+                               │  ▲
+                               │  └── 새로고침 (대기열 맨 뒤로 재진입)
+                               ├──▶ ABANDONED (대기 중 이탈)
                                └──▶ SOLD_OUT (재고 소진으로 일괄 종료)
+
+ERROR ──(재시도 남음, 백오프 후)──▶ REQUESTING
 ```
+
+재시도는 별도 상태로 두지 않고 `REQUESTING`으로 돌아갑니다. 사용자 타임라인에는 몇 번째 시도인지(`attempt`)를 함께 기록합니다.
