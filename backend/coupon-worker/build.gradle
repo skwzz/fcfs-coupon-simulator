@@ -1,0 +1,13 @@
+// Kafka Consumer, DLT 처리, 대사(reconciliation) 배치
+apply plugin: 'org.springframework.boot'
+
+dependencies {
+	implementation project(':common')
+	// 헬스체크와 지표 노출용 웹 서버
+	implementation 'org.springframework.boot:spring-boot-starter-webmvc'
+	implementation 'org.springframework.boot:spring-boot-starter-actuator'
+	implementation 'org.springframework.boot:spring-boot-starter-data-jpa'
+	implementation 'org.springframework.boot:spring-boot-starter-data-redis'
+	implementation 'org.springframework.boot:spring-boot-starter-kafka'
+	runtimeOnly 'com.mysql:mysql-connector-j'
+}

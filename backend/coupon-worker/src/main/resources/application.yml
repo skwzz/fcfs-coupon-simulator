@@ -1,0 +1,35 @@
+# 개발 모드 기본값. 실측 모드(Docker)에서는 환경변수로 호스트를 바꾼다.
+server:
+  port: ${SERVER_PORT:8082}
+
+spring:
+  application:
+    name: coupon-worker
+  threads:
+    virtual:
+      enabled: true
+  datasource:
+    url: jdbc:mysql://${DB_HOST:localhost}:3306/coupon?serverTimezone=Asia/Seoul&characterEncoding=UTF-8
+    username: coupon
+    password: coupon
+    hikari:
+      maximum-pool-size: ${DB_POOL_SIZE:10}
+  jpa:
+    open-in-view: false
+    hibernate:
+      ddl-auto: none
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: 6379
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics
+  endpoint:
+    health:
+      show-details: always

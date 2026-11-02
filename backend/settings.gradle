@@ -1,0 +1,6 @@
+rootProject.name = 'fcfs-backend'
+
+include 'common'
+include 'coupon-api'
+include 'coupon-worker'
+include 'simulator'

@@ -12,7 +12,7 @@
 
 | 영역 | 선택 | 비고 |
 |---|---|---|
-| Backend | Spring Boot 3.x, Java 21 | Virtual Thread 사용 |
+| Backend | Spring Boot 4.1, Java 21, Gradle 9 (멀티모듈) | Virtual Thread 사용 |
 | DB | MySQL 8 | 발급 이력과 재고의 최종 저장소 |
 | Cache / 대기열 | Redis 7 | 원자적 재고 차감, 대기열(Sorted Set), 분산 락 |
 | Messaging | Kafka (KRaft 모드) | 비동기 발급 전략에 사용 |
@@ -21,6 +21,59 @@
 
 실무 구성(로드밸런서, 다중 인스턴스, 별도 Consumer 워커, 별도 부하 생성기)을 그대로 두고,
 컨테이너 자원만 작게 제한해서 **작은 규모로 실무 병목을 재현**하는 것이 목표입니다.
+
+## 로컬 실행 (개발 모드)
+
+필요한 것: Docker Desktop, JDK 21, Node.js 20+
+
+**1. 인프라 (MySQL, Redis, Kafka)**
+
+```bash
+docker compose -f infra/docker-compose.yml up -d --wait
+```
+
+Kafka UI까지 보고 싶으면 `--profile tools`를 붙이면 됩니다(http://localhost:8085).
+
+**2. 백엔드** (`backend/` 폴더에서, 각각 다른 터미널)
+
+```bash
+./gradlew :coupon-api:bootRun
+./gradlew :coupon-worker:bootRun
+./gradlew :simulator:bootRun
+```
+
+| 앱 | 포트 | 헬스체크 |
+|---|---|---|
+| coupon-api | 8080 | http://localhost:8080/actuator/health |
+| coupon-worker | 8082 | http://localhost:8082/actuator/health |
+| simulator | 8090 | http://localhost:8090/actuator/health |
+
+**3. 프론트엔드**
+
+```bash
+npm --prefix frontend install
+npm --prefix frontend run dev
+```
+
+http://localhost:5173
+
+**정리**
+
+```bash
+docker compose -f infra/docker-compose.yml down      # 컨테이너만 내림 (데이터 유지)
+docker compose -f infra/docker-compose.yml down -v   # 데이터까지 삭제
+```
+
+### 문제 해결: `Unable to establish loopback connection`
+
+Windows에서 Java는 내부 통신에 임시 폴더의 소켓 파일을 씁니다. 보안 프로그램 등이 사용자 임시 폴더(`AppData\Local\Temp`)의 소켓 파일을 막으면 Gradle과 Spring 앱이 이 에러로 실행되지 않습니다.
+다른 폴더를 쓰도록 지정하면 해결됩니다.
+
+```bash
+setx JAVA_TOOL_OPTIONS "-Djdk.net.unixdomain.tmpdir=D:\tmp\jdk-uds"
+```
+
+`D:\tmp\jdk-uds` 폴더를 먼저 만들고 실행하세요. 새로 연 터미널과 IDE부터 적용됩니다.
 
 ## 문서
 
