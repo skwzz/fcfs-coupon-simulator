@@ -116,6 +116,7 @@ export function HistoryPage() {
                 <th className="pb-2">대상</th>
                 <th className="pb-2 text-right">사용자</th>
                 <th className="pb-2 text-right">재고</th>
+                <th className="pb-2 text-right">요청 (재시도)</th>
                 <th className="pb-2 text-right">평균 TPS</th>
                 <th className="pb-2 text-right">p99</th>
                 <th className="pb-2 text-right">소요</th>
@@ -141,6 +142,10 @@ export function HistoryPage() {
                   </td>
                   <td className="py-2 text-right tabular-nums">{fmt(r.userCount)}</td>
                   <td className="py-2 text-right tabular-nums">{fmt(r.stock)}</td>
+                  <td className="py-2 text-right tabular-nums text-slate-400">
+                    {r.requests != null ? fmt(r.requests) : '-'}
+                    {r.retries ? <span className="text-rose-300"> ({fmt(r.retries)})</span> : null}
+                  </td>
                   <td className="py-2 text-right tabular-nums">{r.avgTps != null ? fmt(r.avgTps) : '-'}</td>
                   <td className={`py-2 text-right tabular-nums ${(r.latencyMs.p99 ?? 0) > 1000 ? 'text-amber-400' : ''}`}>
                     {r.latencyMs.p99 != null ? `${fmt(Math.round(r.latencyMs.p99))}ms` : '-'}

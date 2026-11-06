@@ -216,14 +216,19 @@ Producer/Consumer 설정과 실패 처리는 [03. 발급 전략 - 정합성 보�
 | mysql | `mysql:8.4` | 3306 | cpu 1, 1G | `max_connections=100` |
 | redis | `redis:7.4` | 6379 | cpu 0.5, 256M | `appendonly yes` |
 | kafka | `apache/kafka:3.8.0` (KRaft, 단일 브로커) | 9092 | cpu 1, 1G | |
-| nginx | `nginx:1.27` | 8080 | cpu 0.5, 128M | round robin, keepalive |
-| coupon-api ×2 | 직접 빌드 | (내부) | 각 cpu 1, 512M | HikariCP `maximumPoolSize=10`, Virtual Thread |
+| nginx | `nginx:1.27` | 8080 | cpu 0.5, 256M | 워커 1개, `worker_connections 16384`, round robin, keepalive |
+| coupon-api ×2 | 직접 빌드 | (내부) | 각 cpu 1, 1G (힙 50%) | HikariCP `maximumPoolSize=10`·`connection-timeout 10s`, Tomcat `max-connections 1000`·`accept-count 2000`, Virtual Thread |
 | coupon-worker | 직접 빌드 | (내부) | cpu 0.5, 384M | |
-| simulator | 직접 빌드 | 8090 | cpu 2, 1G | |
+| simulator | 직접 빌드 | 8090 | cpu 2, 1.5G (힙 60%) | |
 | kafka-ui (선택) | `provectuslabs/kafka-ui` | 8085 | | |
 
 - 위 수치는 출발점입니다. 노트북 코어 수에 맞춰 조정하되, **전체 합이 호스트 코어 수를 넘지 않게** 해야 컨테이너끼리 CPU를 뺏고 빼앗는 왜곡이 줄어듭니다.
 - coupon-api의 Tomcat 연결 대기 큐(`server.tomcat.accept-count`)는 2000으로 늘려 둡니다. 기본값 100이면 수천 명이 동시에 새 연결을 맺을 때 연결 거부(`ConnectException`)가 납니다. 실무에서는 앞단 로드밸런서가 이 버스트를 받아 줍니다.
+- 처음 수치(nginx 128M, coupon-api 512M, simulator 1G)에서 Phase 4 부하를 걸어 보고 고친 값입니다. 고친 이유는 모두 실무에서 자주 겪는 문제입니다.
+  - **coupon-api 512M → 1G, 힙 75% → 50%**: Redisson을 넣은 뒤 유휴 상태에서도 메모리 한도에 붙어 처리량이 절반 이하로 떨어졌습니다. 동시 연결 수천 개의 소켓 버퍼와 Netty 직접 메모리는 힙 밖에서 쓰므로 힙 비율을 낮춰 자리를 남깁니다.
+  - **Tomcat `max-connections` 8192 → 1000, Hikari `connection-timeout` 30초 → 10초**: Virtual Thread는 스레드 수 제한이 없어서 요청을 받는 대로 다 받습니다. 재시도 폭주 때 커넥션을 기다리는 요청이 힙을 채워 OOM이 났고, OOM 뒤에는 GC만 돌면서 회복하지 못했습니다. 동시 처리 수를 제한하고 오래 기다리는 요청은 빨리 실패시키는 백프레셔가 필요합니다.
+  - **nginx `worker_processes auto` → 1, 128M → 256M**: `auto`는 컨테이너 CPU 제한이 아니라 호스트 코어 수(20)만큼 워커를 띄워서 메모리 한도를 넘고 워커가 OOM으로 죽었습니다. `worker_connections`도 상한을 둬서 넘치는 연결은 바로 끊습니다.
+  - **simulator 1G → 1.5G**: 동시 연결 1만 개 이상에서 부하 생성기가 먼저 한계에 닿으면 측정이 왜곡됩니다.
 - simulator도 같은 호스트에서 돌기 때문에 절대 수치보다 **전략 간 상대 비교**에 의미를 둡니다. 부하 생성기를 다른 장비로 옮기는 것은 [확장 백로그](07-backlog.md)에 있습니다.
 
 ## 8. 측정 방식

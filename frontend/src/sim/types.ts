@@ -38,8 +38,8 @@ export const STRATEGIES = [
   { value: 'SYNCHRONIZED', label: 'SYNCHRONIZED' },
   { value: 'DB_PESSIMISTIC', label: 'DB 비관적 락' },
   { value: 'DB_OPTIMISTIC', label: 'DB 낙관적 락' },
-  { value: 'REDIS_LOCK', label: 'Redis 분산 락', phase: 4 },
-  { value: 'REDIS_ATOMIC', label: 'Redis Lua (원자적)', phase: 4 },
+  { value: 'REDIS_LOCK', label: 'Redis 분산 락' },
+  { value: 'REDIS_ATOMIC', label: 'Redis Lua (원자적)' },
   { value: 'REDIS_KAFKA', label: 'Redis + Kafka (비동기)', phase: 6 },
 ] as const
 
@@ -47,11 +47,35 @@ export type Strategy = (typeof STRATEGIES)[number]['value']
 
 export const BEHAVIORS = [
   { value: 'IDEAL', label: 'IDEAL (1회 요청)' },
-  { value: 'REALISTIC', label: 'REALISTIC', phase: 4 },
-  { value: 'AGGRESSIVE', label: 'AGGRESSIVE', phase: 4 },
+  { value: 'REALISTIC', label: 'REALISTIC (일반 사용자)' },
+  { value: 'AGGRESSIVE', label: 'AGGRESSIVE (매크로·조급)' },
 ] as const
 
 export type Behavior = (typeof BEHAVIORS)[number]['value']
+
+/** 행동 모델 세부 값. 백엔드 BehaviorModel과 같은 의미 */
+export interface BehaviorDetail {
+  thinkMinMs: number
+  thinkMaxMs: number
+  /** 연타하는 사용자 비율 0~1 */
+  multiClickRatio: number
+  clicks: number
+  maxRetries: number
+  backoffMs: number
+  jitter: boolean
+  /** 클라이언트가 응답을 기다리는 최대 시간 */
+  timeoutMs: number
+}
+
+/** 프리셋 기본값 (simulator BehaviorModel.of와 같게 유지) */
+export const BEHAVIOR_PRESETS: Record<Behavior, BehaviorDetail> = {
+  IDEAL: { thinkMinMs: 0, thinkMaxMs: 0, multiClickRatio: 0, clicks: 1, maxRetries: 0, backoffMs: 0, jitter: false, timeoutMs: 30000 },
+  REALISTIC: { thinkMinMs: 0, thinkMaxMs: 300, multiClickRatio: 0.2, clicks: 3, maxRetries: 2, backoffMs: 500, jitter: true, timeoutMs: 10000 },
+  AGGRESSIVE: { thinkMinMs: 0, thinkMaxMs: 0, multiClickRatio: 0.5, clicks: 3, maxRetries: 3, backoffMs: 0, jitter: false, timeoutMs: 3000 },
+}
+
+/** DB 카운터(issued_quantity)로 재고를 세는 전략. Redis 전략은 카운터 대신 Redis 재고를 쓴다 */
+export const COUNTER_STRATEGIES: Strategy[] = ['NAIVE', 'SYNCHRONIZED', 'DB_PESSIMISTIC', 'DB_OPTIMISTIC', 'REDIS_LOCK']
 
 export interface SimConfig {
   strategy: Strategy
@@ -59,6 +83,7 @@ export interface SimConfig {
   userCount: number
   rampUpMs: number
   behavior: Behavior
+  behaviorDetail: BehaviorDetail
   queueEnabled: boolean
   admitPerSecond: number
   notifyMode: 'SSE' | 'POLLING'
@@ -90,7 +115,12 @@ export interface TickMsg {
   tps: number
   latencyMs: Latency
   queueLength: number
+  /** 누적 재시도 수 */
   retries: number
+  /** 누적 요청 수 (연타·재시도 포함) */
+  requests: number
+  /** 응답 결과별 누적 수 */
+  responses: Record<string, number>
   /** 인스턴스별 누적 응답 수 (X-Served-By) */
   servedBy: Record<string, number>
   /** 인스턴스별 최근 서버 지표 */
@@ -105,7 +135,8 @@ export interface ServerSample {
 }
 
 export interface UsersMsg {
-  changes: [number, Status, number?][]
+  /** [userId, status, rank, attempts] */
+  changes: [number, Status, number | null, number?][]
 }
 
 export interface Verification {
@@ -115,6 +146,9 @@ export interface Verification {
   overIssued: number
   duplicateIssued: number
   passed: boolean
+  /** Redis 남은 재고 (Phase 4 이전 기록은 null) */
+  redisStock: number | null
+  redisIssuedUsers: number | null
 }
 
 export type RunState = 'RUNNING' | 'DONE' | 'STOPPED' | 'FAILED'
@@ -129,12 +163,19 @@ export interface DoneMsg {
   error: string | null
   servedBy: Record<string, number> | null
   serverPeak: Record<string, ServerSample> | null
+  requests: number | null
+  retries: number | null
+  responses: Record<string, number> | null
+  /** 에러 사유별 응답 수 */
+  errors: Record<string, number> | null
 }
 
 export interface TimelineEntry {
   t: number
   status: Status
-  rank?: number
+  rank?: number | null
+  /** 그 사용자의 몇 번째 요청인지 (연타·재시도 포함) */
+  attempt?: number | null
   note?: string | null
 }
 
@@ -165,6 +206,8 @@ export interface RunSummary {
   verification: Verification | null
   counts: Partial<Record<Status, number>>
   servedBy: Record<string, number>
+  requests: number | null
+  retries: number | null
   error: string | null
 }
 
@@ -174,6 +217,7 @@ export interface SeriesPoint {
   latencyMs: Latency
   queueLength: number
   hikariPending: number | null
+  retries: number | null
 }
 
 export interface Comparison {

@@ -35,6 +35,8 @@ export interface RunData {
   stock: number
   status: Uint8Array
   rank: Int32Array
+  /** 사용자별 요청 수 (연타·재시도 포함, 255에서 멈춤) */
+  attempts: Uint8Array
   ticks: TickMsg[]
   done: DoneMsg | null
   error: string | null
@@ -49,6 +51,7 @@ function emptyRun(userCount: number, stock: number): RunData {
     stock,
     status: new Uint8Array(userCount),
     rank: new Int32Array(userCount).fill(-1),
+    attempts: new Uint8Array(userCount),
     ticks: [],
     done: null,
     error: null,
@@ -99,15 +102,17 @@ export function useSimulation(config: SimConfig) {
           r.userCount = msg.userCount
           r.status = new Uint8Array(msg.userCount)
           r.rank = new Int32Array(msg.userCount).fill(-1)
+          r.attempts = new Uint8Array(msg.userCount)
         }
         bump()
       })
       es.addEventListener('users', (e) => {
         const msg: UsersMsg = JSON.parse((e as MessageEvent).data)
         const r = runRef.current
-        for (const [userId, status, rank] of msg.changes) {
+        for (const [userId, status, rank, attempts] of msg.changes) {
           r.status[userId - 1] = S[status]
           r.rank[userId - 1] = rank ?? -1
+          r.attempts[userId - 1] = Math.min(255, attempts ?? 0)
         }
         // tick과 같은 주기로 오므로 다시 그리기는 tick에서 한 번만
       })
@@ -142,7 +147,13 @@ export function useSimulation(config: SimConfig) {
           userCount: config.userCount,
           rampUpMs: config.rampUpMs,
           queueEnabled: config.queueEnabled,
-          behavior: { preset: config.behavior },
+          behavior: {
+            preset: config.behavior,
+            thinkTimeMs: [config.behaviorDetail.thinkMinMs, config.behaviorDetail.thinkMaxMs],
+            multiClick: { ratio: config.behaviorDetail.multiClickRatio, clicks: config.behaviorDetail.clicks },
+            retry: { maxRetries: config.behaviorDetail.maxRetries, backoffMs: config.behaviorDetail.backoffMs, jitter: config.behaviorDetail.jitter },
+            timeoutMs: config.behaviorDetail.timeoutMs,
+          },
         }),
       })
       if (!res.ok) throw new Error(await errorMessage(res))

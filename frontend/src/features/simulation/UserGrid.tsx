@@ -5,6 +5,7 @@ import { DISPLAY_ORDER, STATUSES, STATUS_META, S } from '../../sim/types'
 export function UserGrid({
   status,
   rank,
+  attempts,
   version,
   selected,
   pinned,
@@ -12,6 +13,7 @@ export function UserGrid({
 }: {
   status: Uint8Array
   rank: Int32Array
+  attempts?: Uint8Array
   version: number
   selected: number | null
   pinned: number[]
@@ -104,6 +106,7 @@ export function UserGrid({
           <span className="mx-1.5 text-slate-600">·</span>
           <span style={{ color: STATUS_META[STATUSES[status[hover.id]]].color }}>{STATUS_META[STATUSES[status[hover.id]]].label}</span>
           {status[hover.id] === S.WAITING && <span className="ml-1.5 text-slate-300">순번 {rank[hover.id].toLocaleString()}</span>}
+          {attempts && attempts[hover.id] > 1 && <span className="ml-1.5 text-slate-300">요청 {attempts[hover.id]}회</span>}
         </div>
       )}
     </div>

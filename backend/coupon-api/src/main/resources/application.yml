@@ -5,6 +5,10 @@ server:
     # 수천 명이 동시에 새 연결을 맺으면 기본 대기 큐(100)가 넘쳐서 연결 거부가 난다.
     # 실무에서는 앞단 로드밸런서가 이 버스트를 받아 주므로, 개발 모드에서는 큐를 넉넉히 둔다.
     accept-count: ${ACCEPT_COUNT:2000}
+    # 동시에 처리하는 연결 상한. Virtual Thread는 스레드 수 제한이 없어서 이 값이 사실상 동시 요청 상한이다.
+    # 넘치는 연결은 OS 대기 큐(accept-count)에서 기다리고, 그것도 넘치면 거절된다 (백프레셔).
+    # 크게 두면 재시도 폭주 때 커넥션을 기다리는 요청이 힙을 다 채워 OOM으로 멈춘다 (4096에서 재현, docs/06 Phase 4 결과)
+    max-connections: ${MAX_CONNECTIONS:1000}
 
 spring:
   application:
@@ -18,6 +22,8 @@ spring:
     password: coupon
     hikari:
       maximum-pool-size: ${DB_POOL_SIZE:10}
+      # 커넥션을 이 시간 안에 못 받으면 실패시킨다 (기본 30초). 오래 기다리게 두면 요청이 쌓여 서버 전체가 느려진다
+      connection-timeout: ${DB_CONNECTION_TIMEOUT_MS:10000}
   jpa:
     open-in-view: false
     hibernate:

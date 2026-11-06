@@ -37,12 +37,18 @@ public class CouponIssue {
 
 	private Instant issuedAt;
 
-	public static CouponIssue of(CouponEvent event, long userId, StrategyType strategy) {
+	public static CouponIssue of(CouponEvent event, IssueCommand command, StrategyType strategy) {
+		return of(command, strategy, event.isUniqueConstraintEnabled());
+	}
+
+	/** 이벤트 엔티티를 읽지 않는 경로(Redis 전략)용 */
+	public static CouponIssue of(IssueCommand command, StrategyType strategy, boolean uniqueConstraintEnabled) {
 		CouponIssue issue = new CouponIssue();
-		issue.eventId = event.getId();
-		issue.userId = userId;
+		issue.eventId = command.eventId();
+		issue.userId = command.userId();
 		issue.strategy = strategy;
-		issue.dupGuard = event.isUniqueConstraintEnabled() ? 0 : ThreadLocalRandom.current().nextLong(1, Long.MAX_VALUE);
+		issue.requestId = command.requestId();
+		issue.dupGuard = uniqueConstraintEnabled ? 0 : ThreadLocalRandom.current().nextLong(1, Long.MAX_VALUE);
 		issue.issuedAt = Instant.now();
 		return issue;
 	}

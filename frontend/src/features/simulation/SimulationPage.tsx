@@ -2,7 +2,8 @@ import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import { CartesianGrid, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts'
 import { Badge, Button, Card, Field, Kpi, fmt, inputClass } from '../../components/ui'
 import { QueueScreen } from '../../components/QueueScreen'
-import { BEHAVIORS, DISPLAY_ORDER, STATUSES, STATUS_META, STRATEGIES, type DoneMsg, type RunSummary, type SimConfig, type Status, type TimelineEntry } from '../../sim/types'
+import { BEHAVIOR_PRESETS, COUNTER_STRATEGIES, DISPLAY_ORDER, STATUSES, STATUS_META, STRATEGIES, type DoneMsg, type RunSummary, type SimConfig, type Status, type Strategy, type TimelineEntry } from '../../sim/types'
+import { BehaviorSettings } from './BehaviorSettings'
 import { rememberedRunId, useSimulation, useUserDetail } from '../../sim/useSimulation'
 import { ServerPanel } from './ServerPanel'
 import { GridLegend, UserGrid } from './UserGrid'
@@ -14,6 +15,7 @@ const DEFAULT_CONFIG: SimConfig = {
   userCount: 3000,
   rampUpMs: 0,
   behavior: 'IDEAL',
+  behaviorDetail: BEHAVIOR_PRESETS.IDEAL,
   queueEnabled: false,
   admitPerSecond: 100,
   notifyMode: 'SSE',
@@ -40,6 +42,7 @@ export function SimulationPage() {
           userCount: summary.userCount,
           rampUpMs: summary.rampUpMs,
           behavior: summary.behaviorPreset,
+          behaviorDetail: BEHAVIOR_PRESETS[summary.behaviorPreset],
         }))
         attach(summary)
       })
@@ -95,20 +98,18 @@ export function SimulationPage() {
               <Field label="사용자 수">
                 <input type="number" className={inputClass} value={config.userCount} disabled={busy} onChange={(e) => set('userCount', Math.min(10000, Math.max(1, +e.target.value)))} />
               </Field>
-              <Field label="행동 모델">
-                <select className={inputClass} value={config.behavior} disabled={busy} onChange={(e) => set('behavior', e.target.value as SimConfig['behavior'])}>
-                  {BEHAVIORS.map((b) => (
-                    <option key={b.value} value={b.value} disabled={'phase' in b}>
-                      {b.label}
-                      {'phase' in b ? ` (Phase ${b.phase})` : ''}
-                    </option>
-                  ))}
-                </select>
-              </Field>
               <Field label="램프업 (ms)">
                 <input type="number" className={inputClass} value={config.rampUpMs} disabled={busy} onChange={(e) => set('rampUpMs', Math.max(0, +e.target.value))} />
               </Field>
             </div>
+
+            <BehaviorSettings
+              preset={config.behavior}
+              detail={config.behaviorDetail}
+              disabled={busy}
+              onPreset={(p) => setConfig((c) => ({ ...c, behavior: p, behaviorDetail: BEHAVIOR_PRESETS[p] }))}
+              onDetail={(d) => set('behaviorDetail', d)}
+            />
 
             <div className="rounded-lg border border-slate-800 p-3 opacity-60">
               <label className="flex items-center justify-between text-sm">
@@ -157,20 +158,25 @@ export function SimulationPage() {
             sub={`성공 응답 ${fmt(issued)}건`}
             tone={issued > run.stock ? 'bad' : (last?.stockLeft ?? run.stock) === 0 ? 'warn' : 'default'}
           />
-          <Kpi label="TPS" value={fmt(last?.tps ?? 0)} sub="최근 1초 완료 건수" />
+          <Kpi label="TPS" value={fmt(last?.tps ?? 0)} sub="최근 1초 완료 요청 수" />
           <Kpi
             label="지연시간 p99"
             value={lastLatency?.p99 != null ? `${fmt(Math.round(lastLatency.p99))}ms` : '-'}
             sub={lastLatency ? `p50 ${fmt(Math.round(lastLatency.p50 ?? 0))} · p95 ${fmt(Math.round(lastLatency.p95 ?? 0))}` : '구간별 측정'}
             tone={(lastLatency?.p99 ?? 0) > 1000 ? 'warn' : 'default'}
           />
-          <Kpi label="요청 중" value={fmt(counts.REQUESTING)} sub="응답을 기다리는 사용자" tone={counts.REQUESTING > 0 ? 'warn' : 'default'} />
+          <Kpi
+            label="요청 중"
+            value={fmt(counts.REQUESTING)}
+            sub={last ? `누적 요청 ${fmt(last.requests)} · 재시도 ${fmt(last.retries)}` : '응답을 기다리는 사용자'}
+            tone={(last?.retries ?? 0) > 0 ? 'bad' : counts.REQUESTING > 0 ? 'warn' : 'default'}
+          />
           <Kpi label="진행" value={`${Math.round((finished / run.userCount) * 100)}%`} sub={`${(elapsed / 1000).toFixed(1)}초 경과`} />
         </div>
 
         <div className="grid grid-cols-[1fr_220px] gap-4">
           <Card title={`가상 사용자 ${fmt(run.userCount)}명`} right={<span className="text-xs text-slate-500">셀을 클릭하면 사용자 상세</span>}>
-            <UserGrid status={run.status} rank={run.rank} version={version} selected={selected} pinned={pinned} onSelect={setSelected} />
+            <UserGrid status={run.status} rank={run.rank} attempts={run.attempts} version={version} selected={selected} pinned={pinned} onSelect={setSelected} />
             <div className="mt-3 border-t border-slate-800 pt-3">
               <GridLegend />
             </div>
@@ -225,7 +231,9 @@ export function SimulationPage() {
   )
 }
 
-function ResultBanner({ done, strategy }: { done: DoneMsg; strategy: string }) {
+const RESPONSE_LABEL: Record<string, string> = { ISSUED: '발급', ACCEPTED: '발급 확정', SOLD_OUT: '매진', DUPLICATE: '중복', NOT_ADMITTED: '입장 전', ERROR: '에러' }
+
+function ResultBanner({ done, strategy }: { done: DoneMsg; strategy: Strategy }) {
   const v = done.verification
   const ok = v?.passed ?? false
   const ms = (n: number | null) => (n == null ? '-' : `${fmt(Math.round(n))}ms`)
@@ -245,8 +253,32 @@ function ResultBanner({ done, strategy }: { done: DoneMsg; strategy: string }) {
           ) : (
             <div className="mt-0.5 text-sm text-slate-300">{done.error}</div>
           )}
-          {v && v.issuedQuantityCounter !== v.issuedInDb && (
+          {v && v.redisStock != null && !COUNTER_STRATEGIES.includes(strategy) && (
+            <div className="mt-0.5 text-xs text-slate-400">
+              Redis 남은 재고 {fmt(v.redisStock)} · 발급 Set {fmt(v.redisIssuedUsers ?? 0)}명
+              {v.redisIssuedUsers === v.issuedInDb ? ' (DB와 일치)' : ' (DB와 불일치)'}
+            </div>
+          )}
+          {v && COUNTER_STRATEGIES.includes(strategy) && v.issuedQuantityCounter !== v.issuedInDb && (
             <div className="mt-1 text-xs text-slate-400">카운터와 실제 발급 행 수가 다릅니다. 동시에 읽은 값에 +1을 덮어써서 갱신이 사라졌기 때문입니다 (lost update).</div>
+          )}
+          {done.responses && (
+            <div className="mt-2 text-xs text-slate-400">
+              요청 {fmt(done.requests ?? 0)}건 (재시도 {fmt(done.retries ?? 0)}) · 응답{' '}
+              {Object.entries(done.responses)
+                .map(([k, n]) => `${RESPONSE_LABEL[k] ?? k} ${fmt(n)}`)
+                .join(' / ')}
+              {done.errors && Object.keys(done.errors).length > 0 && (
+                <span className="text-rose-300">
+                  {' '}
+                  · 에러 사유{' '}
+                  {Object.entries(done.errors)
+                    .sort((a, b) => b[1] - a[1])
+                    .map(([k, n]) => `${k} ${fmt(n)}`)
+                    .join(', ')}
+                </span>
+              )}
+            </div>
           )}
         </div>
         <div className="shrink-0 text-right text-xs leading-5 text-slate-400">
@@ -357,6 +389,7 @@ function UserDrawer({
             <span className="w-14 shrink-0 text-xs tabular-nums text-slate-500">{e.t < 1000 ? `${e.t}ms` : `${(e.t / 1000).toFixed(1)}s`}</span>
             <span className="text-xs">
               <span style={{ color: STATUS_META[e.status].color }}>{e.status}</span>
+              {e.attempt != null && e.status === 'REQUESTING' && <span className="ml-1.5 text-slate-500">#{e.attempt}</span>}
               {e.rank != null && <span className="ml-1.5 text-slate-300">순번 {fmt(e.rank)}</span>}
               {e.note && <div className="mt-0.5 text-slate-500">{e.note}</div>}
             </span>

@@ -37,13 +37,16 @@ services:
       <<: *backend-env
       INSTANCE_ID: coupon-api-1
       DB_POOL_SIZE: 10
+      # 힙은 제한의 50%. 나머지는 동시 연결 수천 개의 소켓 버퍼, Netty(Lettuce·Redisson) 직접 메모리, 메타스페이스 몫
+      JAVA_OPTS: -XX:MaxRAMPercentage=50
     healthcheck: *healthcheck
     depends_on: *infra-ready
     deploy:
       resources:
         limits:
           cpus: "1"
-          memory: 512m
+          # 512m에서는 Redisson 추가 후 메모리 한도에 붙어 처리량이 절반 이하로 떨어졌다 (docs/02 7장)
+          memory: 1g
 
   coupon-api-2:
     image: fcfs/coupon-api
@@ -52,6 +55,7 @@ services:
       <<: *backend-env
       INSTANCE_ID: coupon-api-2
       DB_POOL_SIZE: 10
+      JAVA_OPTS: -XX:MaxRAMPercentage=50
     healthcheck: *healthcheck
     # 같은 이미지를 쓰므로 1번이 빌드·기동된 뒤에 띄운다 (Flyway 마이그레이션도 1번이 먼저 끝냄)
     depends_on:
@@ -61,7 +65,7 @@ services:
       resources:
         limits:
           cpus: "1"
-          memory: 512m
+          memory: 1g
 
   coupon-worker:
     build:
@@ -104,7 +108,8 @@ services:
       resources:
         limits:
           cpus: "0.5"
-          memory: 128m
+          # 동시 연결마다 버퍼를 잡는다. worker_connections 상한까지 받아도 넘지 않게 둔다
+          memory: 256m
 
   simulator:
     build:
@@ -119,6 +124,7 @@ services:
       # 가상 사용자 요청은 nginx로 보내고, 서버 지표는 각 인스턴스에서 직접 읽는다
       TARGET_BASE_URL: http://nginx
       SERVER_METRICS_URLS: http://coupon-api-1:8080,http://coupon-api-2:8080
+      JAVA_OPTS: -XX:MaxRAMPercentage=60
     ports:
       - "8090:8090"
     healthcheck: *healthcheck
@@ -131,4 +137,5 @@ services:
       resources:
         limits:
           cpus: "2"
-          memory: 1g
+          # 부하 생성기가 먼저 한계에 닿으면 측정이 왜곡된다. 재시도 폭주 때 동시 연결 1만 개를 버틸 만큼 둔다
+          memory: 1536m

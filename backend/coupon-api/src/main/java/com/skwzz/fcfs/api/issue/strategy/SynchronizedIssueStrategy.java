@@ -1,5 +1,6 @@
 package com.skwzz.fcfs.api.issue.strategy;
 
+import com.skwzz.fcfs.api.issue.IssueCommand;
 import com.skwzz.fcfs.api.issue.IssueResult;
 import com.skwzz.fcfs.common.issue.StrategyType;
 import lombok.RequiredArgsConstructor;
@@ -25,7 +26,7 @@ class SynchronizedIssueStrategy implements IssueStrategy {
 	}
 
 	@Override
-	public synchronized IssueResult issue(long eventId, long userId) {
-		return transactionTemplate.execute(status -> issuer.issueWithoutLock(eventId, userId, type()));
+	public synchronized IssueResult issue(IssueCommand command) {
+		return transactionTemplate.execute(status -> issuer.issueWithoutLock(command, type()));
 	}
 }
