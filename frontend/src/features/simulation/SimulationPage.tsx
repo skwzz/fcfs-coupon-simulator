@@ -2,8 +2,9 @@ import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import { CartesianGrid, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts'
 import { Badge, Button, Card, Field, Kpi, fmt, inputClass } from '../../components/ui'
 import { QueueScreen } from '../../components/QueueScreen'
-import { BEHAVIORS, DISPLAY_ORDER, STATUSES, STATUS_META, STRATEGIES, type DoneMsg, type SimConfig, type Status, type TimelineEntry } from '../../sim/types'
-import { useSimulation, useUserDetail } from '../../sim/useSimulation'
+import { BEHAVIORS, DISPLAY_ORDER, STATUSES, STATUS_META, STRATEGIES, type DoneMsg, type RunSummary, type SimConfig, type Status, type TimelineEntry } from '../../sim/types'
+import { rememberedRunId, useSimulation, useUserDetail } from '../../sim/useSimulation'
+import { ServerPanel } from './ServerPanel'
 import { GridLegend, UserGrid } from './UserGrid'
 import { toQueueView } from './userView'
 
@@ -22,7 +23,28 @@ const defaultPins = (n: number) => [...new Set([0, Math.floor(n / 2), n - 1])]
 
 export function SimulationPage() {
   const [config, setConfig] = useState<SimConfig>(DEFAULT_CONFIG)
-  const { run, version, start, stop, reset } = useSimulation(config)
+  const { run, version, start, stop, reset, attach } = useSimulation(config)
+
+  // 새로고침했을 때 마지막 실행(진행 중이든 끝났든)을 다시 불러온다
+  useEffect(() => {
+    const runId = rememberedRunId()
+    if (runId == null) return
+    fetch(`/api/simulations/${runId}`)
+      .then((res) => (res.ok ? res.json() : null))
+      .then((summary: RunSummary | null) => {
+        if (!summary) return
+        setConfig((c) => ({
+          ...c,
+          strategy: summary.strategy,
+          stock: summary.stock,
+          userCount: summary.userCount,
+          rampUpMs: summary.rampUpMs,
+          behavior: summary.behaviorPreset,
+        }))
+        attach(summary)
+      })
+      .catch(() => {})
+  }, [attach])
   const [selected, setSelected] = useState<number | null>(null)
   const [pinned, setPinned] = useState<number[]>(defaultPins(DEFAULT_CONFIG.userCount))
 
@@ -183,6 +205,8 @@ export function SimulationPage() {
             />
           </Card>
         </div>
+
+        <ServerPanel ticks={run.ticks} done={run.done} />
 
         {run.done && <ResultBanner done={run.done} strategy={config.strategy} />}
       </div>

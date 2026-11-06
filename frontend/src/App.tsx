@@ -41,8 +41,14 @@ export default function App() {
         </div>
       </header>
       <main className="mx-auto max-w-[1440px] px-6 py-5">
-        {tab === 'simulation' && <SimulationPage />}
-        {tab === 'live' && <LiveJoinPage />}
+        {/* 탭을 옮겨도 화면을 없애지 않고 숨기기만 한다. 없애면 실행 중인 시뮬레이션의 SSE 연결과 화면 상태가 사라진다 */}
+        <div hidden={tab !== 'simulation'}>
+          <SimulationPage />
+        </div>
+        <div hidden={tab !== 'live'}>
+          <LiveJoinPage />
+        </div>
+        {/* 실행 기록은 들어올 때마다 새로 불러오도록 매번 다시 만든다 */}
         {tab === 'history' && <HistoryPage />}
       </main>
     </div>

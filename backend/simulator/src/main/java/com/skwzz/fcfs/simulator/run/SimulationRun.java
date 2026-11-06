@@ -10,12 +10,15 @@ import java.util.EnumMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
+import java.util.TreeMap;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.LongAdder;
 import org.HdrHistogram.Histogram;
 import org.HdrHistogram.Recorder;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
@@ -46,6 +49,8 @@ final class SimulationRun {
 	private final long[] requestedAtNs;
 	private final long[] completedAtNs;
 	private final String[] reason;
+	private final String[] servedBy;
+	private final Map<String, LongAdder> servedByCounts = new ConcurrentHashMap<>();
 	private final ConcurrentLinkedQueue<Integer> changed = new ConcurrentLinkedQueue<>();
 
 	// 지연시간(µs). Recorder는 여러 스레드가 동시에 기록해도 되고, 구간별로 잘라서 꺼낼 수 있다
@@ -59,6 +64,8 @@ final class SimulationRun {
 	private final int[] tpsWindow = new int[TPS_WINDOW];
 	private int tickCount;
 	private int lastCompleted;
+	private Map<String, Messages.ServerSample> server = Map.of();
+	private final Map<String, Messages.ServerSample> serverPeak = new TreeMap<>();
 
 	private final List<SseEmitter> emitters = new CopyOnWriteArrayList<>();
 
@@ -89,6 +96,7 @@ final class SimulationRun {
 		this.requestedAtNs = new long[userCount];
 		this.completedAtNs = new long[userCount];
 		this.reason = new String[userCount];
+		this.servedBy = new String[userCount];
 	}
 
 	// ---- 실행 스레드, 가상 사용자 스레드 ----
@@ -103,9 +111,13 @@ final class SimulationRun {
 	}
 
 	/** latencyNs가 음수면 지연시간 통계에 넣지 않는다 (중단으로 끊긴 요청). */
-	void complete(int i, UserStatus result, String reason, long latencyNs) {
+	void complete(int i, UserStatus result, String reason, String servedBy, long latencyNs) {
 		completedAtNs[i] = System.nanoTime();
 		this.reason[i] = reason;
+		this.servedBy[i] = servedBy;
+		if (servedBy != null) {
+			servedByCounts.computeIfAbsent(servedBy, k -> new LongAdder()).increment();
+		}
 		if (latencyNs >= 0) {
 			recorder.recordValue(Math.max(1, latencyNs / 1_000));
 			completed.incrementAndGet();
@@ -132,8 +144,11 @@ final class SimulationRun {
 
 	// ---- ticker 스레드 ----
 
-	synchronized void tick() {
-		boolean last = finishing; // 먼저 읽어야 마지막 사용자 변경까지 이번 tick에 담긴다
+	/** @param server 이번 tick 시점의 인스턴스별 서버 지표 */
+	synchronized void tick(Map<String, Messages.ServerSample> server) {
+		boolean last = finishing;
+		this.server = server;
+		server.forEach((name, sample) -> serverPeak.merge(name, sample, Messages.ServerSample::max)); // 먼저 읽어야 마지막 사용자 변경까지 이번 tick에 담긴다
 		List<Object[]> changes = drainChanges();
 		broadcast("tick", buildTick(last));
 		if (!changes.isEmpty()) {
@@ -185,16 +200,19 @@ final class SimulationRun {
 		long t = elapsedMs();
 		// 실행 기록용 시계열은 1초에 한 점
 		if (startNanos != 0 && (tickCount % TPS_WINDOW == 0 || last)) {
-			series.add(new Messages.SeriesPoint(t, tps, latency(currentSecond), 0));
+			Integer pending = server.isEmpty() ? null
+					: server.values().stream().mapToInt(Messages.ServerSample::hikariPending).sum();
+			series.add(new Messages.SeriesPoint(t, tps, latency(currentSecond), 0, pending));
 			currentSecond.reset();
 		}
-		return new Messages.Tick(t, stockLeft(counts), counts, tps, latency(interval), 0, 0);
+		return new Messages.Tick(t, stockLeft(counts), counts, tps, latency(interval), 0, 0, servedBy(), server);
 	}
 
 	private Messages.Done buildDone() {
 		long durationNs = startNanos == 0 ? 0 : endNanos - startNanos;
 		int avgTps = durationNs == 0 ? 0 : (int) (completed.get() * 1_000_000_000L / durationNs);
-		return new Messages.Done(finalState, durationNs / 1_000_000, counts(), verification, latency(total), avgTps, error);
+		return new Messages.Done(finalState, durationNs / 1_000_000, counts(), verification, latency(total), avgTps, error,
+				servedBy(), new TreeMap<>(serverPeak));
 	}
 
 	// ---- 구독 ----
@@ -254,7 +272,8 @@ final class SimulationRun {
 			timeline.add(new Messages.TimelineEntry(sinceStart(requestedAtNs[i]), UserStatus.REQUESTING, null, null));
 		}
 		if (s.isFinal()) {
-			String note = "응답 " + latencyMs(i) + "ms" + (reason[i] != null ? " · " + reason[i] : "");
+			String note = "응답 " + latencyMs(i) + "ms" + (servedBy[i] != null ? " · " + servedBy[i] : "")
+					+ (reason[i] != null ? " · " + reason[i] : "");
 			timeline.add(new Messages.TimelineEntry(sinceStart(completedAtNs[i]), s, null, note));
 		}
 		return timeline;
@@ -283,6 +302,12 @@ final class SimulationRun {
 
 	private long latencyMs(int i) {
 		return TimeUnit.NANOSECONDS.toMillis(completedAtNs[i] - requestedAtNs[i]);
+	}
+
+	private Map<String, Long> servedBy() {
+		Map<String, Long> result = new TreeMap<>();
+		servedByCounts.forEach((name, count) -> result.put(name, count.sum()));
+		return result;
 	}
 
 	private Map<UserStatus, Integer> counts() {

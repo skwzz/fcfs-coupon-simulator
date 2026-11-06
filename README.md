@@ -71,6 +71,17 @@ npm --prefix frontend run dev
 http://localhost:5173 에서 시뮬레이션 탭의 ▶ 시작을 누르면 simulator가 가상 사용자를 만들어 coupon-api에 실제 요청을 보냅니다.
 프론트 개발 서버가 `/api/simulations`는 simulator(8090)로, 나머지 `/api`는 coupon-api(8080)로 전달하므로 coupon-api와 simulator가 떠 있어야 합니다.
 
+**실측 모드** (nginx + coupon-api 2대 + coupon-worker + simulator를 모두 Docker로)
+
+개발 모드로 띄운 앱(8080, 8090)을 먼저 내리고 실행합니다. 처음에는 이미지 빌드 때문에 몇 분 걸립니다.
+
+```bash
+docker compose -f infra/docker-compose.yml -f infra/docker-compose.app.yml up -d --build --wait
+```
+
+프론트엔드는 그대로 http://localhost:5173 을 쓰면 됩니다. 시뮬레이션 화면의 "서버 (인스턴스별)" 패널에 coupon-api-1, coupon-api-2가 보이면 실측 모드입니다.
+앱만 내리려면 `docker compose -f infra/docker-compose.yml -f infra/docker-compose.app.yml stop nginx coupon-api-1 coupon-api-2 coupon-worker simulator`를 씁니다.
+
 **정리**
 
 ```bash

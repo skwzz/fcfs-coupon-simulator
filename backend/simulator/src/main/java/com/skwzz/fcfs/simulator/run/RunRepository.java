@@ -149,8 +149,10 @@ public class RunRepository {
 	}
 
 	private Messages.RunSummary summary(ResultSet rs, int rowNum) throws SQLException {
+		Messages.Done done = done(rs);
+		int counter = done == null || done.verification() == null ? 0 : done.verification().issuedQuantityCounter();
 		Verification verification = rs.getObject("passed") == null ? null
-				: new Verification(rs.getInt("stock"), rs.getLong("issued_in_db"), counter(rs), rs.getLong("over_issued"),
+				: new Verification(rs.getInt("stock"), rs.getLong("issued_in_db"), counter, rs.getLong("over_issued"),
 						rs.getLong("duplicate_issued"), rs.getBoolean("passed"));
 		Map<UserStatus, Integer> counts = rs.getString("counts_json") == null ? new EnumMap<>(UserStatus.class)
 				: readJson(rs.getString("counts_json"), COUNTS);
@@ -173,17 +175,14 @@ public class RunRepository {
 						rs.getObject("p99_ms", Double.class), rs.getObject("max_ms", Double.class)),
 				verification,
 				counts,
+				done == null || done.servedBy() == null ? Map.of() : done.servedBy(),
 				rs.getString("error"));
 	}
 
-	/** 발급 카운터는 컬럼으로 두지 않고 done 원문에서 꺼낸다. */
-	private int counter(ResultSet rs) throws SQLException {
+	/** 컬럼으로 두지 않은 값(발급 카운터, 인스턴스별 처리 수 등)은 done 원문에서 꺼낸다. */
+	private Messages.Done done(ResultSet rs) throws SQLException {
 		String result = rs.getString("result_json");
-		if (result == null) {
-			return 0;
-		}
-		Messages.Done done = json.readValue(result, Messages.Done.class);
-		return done.verification() == null ? 0 : done.verification().issuedQuantityCounter();
+		return result == null ? null : json.readValue(result, Messages.Done.class);
 	}
 
 	private <T> T readJson(String value, TypeReference<T> type) {

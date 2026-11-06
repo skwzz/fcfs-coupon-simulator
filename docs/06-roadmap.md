@@ -25,11 +25,14 @@
 - **결과** (5,000명 동시, 재고 100, 개발 모드): NAIVE는 991~1,000장 발급(초과 약 900)이고 초당 80건 정도로 12초 동안 계속 성공한 뒤 한꺼번에 매진. DB_PESSIMISTIC은 정확히 100장, 약 450 TPS로 꾸준히 처리
 
 ## Phase 3. 실무형 배포 구성 (실측 모드)
-- [ ] 각 앱 Dockerfile
-- [ ] `infra/docker-compose.app.yml`: nginx + coupon-api ×2 + coupon-worker + simulator, 컨테이너 자원 제한
-- [ ] `X-Served-By` 응답 헤더, 인스턴스별 처리 비율 표시
-- [ ] 서버 측 핵심 지표 (HikariCP 대기/활성) 대시보드 표시
+- [x] 백엔드 공용 Dockerfile (`backend/Dockerfile`, `MODULE` 인자로 앱 선택)
+- [x] `infra/docker-compose.app.yml`: nginx + coupon-api ×2 + coupon-worker + simulator, 컨테이너 자원 제한
+- [x] `X-Served-By` 응답 헤더, 인스턴스별 처리 비율 표시
+- [x] 서버 측 핵심 지표 (HikariCP 사용/대기, CPU) 대시보드 표시, 실행 기록에 개발/실측 모드 구분
 - **완료 기준**: 요청이 두 인스턴스로 나뉘는 것을 확인하고, `SYNCHRONIZED`가 개발 모드에서는 통과하고 실측 모드에서는 초과 발급되는 것을 재현 (시나리오 S7)
+- **결과** (3,000명 동시, 재고 100): `SYNCHRONIZED`는 개발 모드(API 1대)에서 정확히 100장, 실측 모드(API 2대)에서 189~208장으로 초과 발급. 요청은 두 인스턴스에 50:50으로 나뉨
+  - `SYNCHRONIZED`는 DB 커넥션 대기가 0이고 CPU만 100%. 요청이 DB 풀이 아니라 JVM 락 앞에서 줄을 선다
+  - `DB_PESSIMISTIC`은 인스턴스마다 커넥션 10개를 다 쓰고 약 1,460개 요청이 커넥션을 기다림
 
 ## Phase 4. Redis 전략 + 사용자 행동 모델
 - [ ] `REDIS_LOCK` (Redisson), `REDIS_ATOMIC` (Lua + 실패 시 보상)

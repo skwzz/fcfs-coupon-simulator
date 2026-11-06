@@ -18,6 +18,8 @@ spring:
 simulator:
   # 가상 사용자가 요청을 보낼 곳. 개발 모드는 coupon-api 직접, 실측 모드는 nginx
   target-base-url: ${TARGET_BASE_URL:http://localhost:8080}
+  # 서버 측 지표(HikariCP, CPU)를 읽을 coupon-api 인스턴스들. 로드밸런서를 거치지 않고 각 인스턴스에 직접 묻는다
+  server-metrics-urls: ${SERVER_METRICS_URLS:http://localhost:8080}
   connect-timeout: 5s
   request-timeout: 30s
   # 실시간 상태(사용자 배열 등)를 메모리에 남겨 둘 최근 실행 수. 그보다 오래된 실행은 DB에서 조회한다

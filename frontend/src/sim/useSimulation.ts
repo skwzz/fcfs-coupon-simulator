@@ -1,8 +1,29 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { S, type DoneMsg, type InitMsg, type SimConfig, type TickMsg, type UserDetail, type UsersMsg } from './types'
+import { S, type DoneMsg, type InitMsg, type RunSummary, type SimConfig, type TickMsg, type UserDetail, type UsersMsg } from './types'
 
 // 차트에 남길 tick 수 (200ms × 300 = 60초)
 const MAX_TICKS = 300
+
+// 새로고침해도 마지막 실행에 다시 붙기 위해 runId만 브라우저에 남긴다
+const RUN_KEY = 'fcfs.currentRunId'
+
+export function rememberedRunId(): number | null {
+  try {
+    const v = localStorage.getItem(RUN_KEY)
+    return v ? Number(v) : null
+  } catch {
+    return null
+  }
+}
+
+function rememberRun(runId: number | null) {
+  try {
+    if (runId == null) localStorage.removeItem(RUN_KEY)
+    else localStorage.setItem(RUN_KEY, String(runId))
+  } catch {
+    // 저장소를 못 써도 실행에는 지장 없음
+  }
+}
 
 export type Phase = 'idle' | 'starting' | 'running' | 'stopping' | 'done'
 
@@ -127,6 +148,7 @@ export function useSimulation(config: SimConfig) {
       if (!res.ok) throw new Error(await errorMessage(res))
       const { runId, eventId } = await res.json()
       runRef.current = { ...runRef.current, phase: 'running', runId, eventId }
+      rememberRun(runId)
       bump()
       connect(runId)
     } catch (e) {
@@ -146,10 +168,24 @@ export function useSimulation(config: SimConfig) {
   const reset = useCallback(() => {
     esRef.current?.close()
     runRef.current = emptyRun(config.userCount, config.stock)
+    rememberRun(null)
     bump()
   }, [config.userCount, config.stock, bump])
 
-  return { run: runRef.current, version, start, stop, reset }
+  /**
+   * 이미 시작된 실행에 다시 붙는다 (새로고침 후 등). 서버가 init과 현재 사용자 상태 전체를 먼저 보내 주므로 그리드는 그대로 복원된다.
+   * 끝난 실행이면 done까지 받고 결과 화면이 된다. 차트는 다시 붙은 시점부터 그려진다.
+   */
+  const attach = useCallback(
+    (summary: RunSummary) => {
+      runRef.current = { ...emptyRun(summary.userCount, summary.stock), phase: 'running', runId: summary.runId, eventId: summary.eventId }
+      bump()
+      connect(summary.runId)
+    },
+    [bump, connect],
+  )
+
+  return { run: runRef.current, version, start, stop, reset, attach }
 }
 
 /** 선택한 사용자의 타임라인. 그 사용자의 상태가 바뀔 때마다 다시 가져온다. */
