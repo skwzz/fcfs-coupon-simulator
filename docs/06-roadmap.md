@@ -35,10 +35,17 @@
   - `DB_PESSIMISTIC`은 인스턴스마다 커넥션 10개를 다 쓰고 약 1,460개 요청이 커넥션을 기다림
 
 ## Phase 4. Redis 전략 + 사용자 행동 모델
-- [ ] `REDIS_LOCK` (Redisson), `REDIS_ATOMIC` (Lua + 실패 시 보상)
-- [ ] 행동 모델 `REALISTIC`, `AGGRESSIVE` 프리셋: 연타, 재시도(백오프/지터), `X-Request-Id` 재사용
-- [ ] 프론트: 실제 데이터로 사용자 그리드와 타임라인(시도 횟수 포함), 행동 모델 설정 UI
+- [x] `REDIS_LOCK` (Redisson, watchdog), `REDIS_ATOMIC` (Lua + 실패 시 보상, 키 유실 시 DB 기준 재적재)
+- [x] 행동 모델 `REALISTIC`, `AGGRESSIVE` 프리셋과 세부 값: 생각 시간, 연타, 재시도(지수 백오프/지터), 클라이언트 타임아웃, `X-Request-Id` 재사용
+- [x] 서버 멱등 처리: 같은 `X-Request-Id`의 재시도는 `IDEMPOTENT_REPLAY`로 성공 응답
+- [x] 프론트: 사용자 그리드에 요청 횟수, 타임라인에 클릭·재시도 기록, 행동 모델 설정 UI, 응답·에러 사유 집계
 - **완료 기준**: 10,000명 그리드가 끊기지 않고 갱신되고, `AGGRESSIVE`에서 재시도 폭주로 p99가 나빠지는 것 확인 (시나리오 S6)
+- **결과** (실측 모드, 재고 100)
+  - 5,000명 `IDEAL`: `REDIS_ATOMIC` 약 1,000~1,100 TPS · p99 4~5초, `DB_PESSIMISTIC` 약 200 TPS · p99 20초대, `REDIS_LOCK`은 락 대기 10초를 넘긴 요청이 대부분 `LOCK_TIMEOUT`. 세 전략 모두 초과·중복 발급 0
+  - S3 (500명 × 5번 연타): 요청 2,500건 중 중복 응답 400건, DB 발급 100건으로 1인 1매 유지 (`REDIS_ATOMIC`, `DB_PESSIMISTIC` 모두)
+  - S6 (`DB_PESSIMISTIC` 5,000명): 요청 수 `IDEAL` 5,000 → `REALISTIC` 15,603 → `AGGRESSIVE` 37,115(재시도 27,189). 에러로 끝난 사용자 690 → 2,040 → 2,960, p99 26.8초 → 29.9초. 클라이언트가 포기한 요청까지 서버가 처리하느라 쓸모 있는 처리량이 줄어든다
+  - 10,000명 `REALISTIC` (`REDIS_ATOMIC`, 재고 1,000): 화면 메인 스레드 최대 정지 100ms로 그리드 갱신이 끊기지 않음. 동시 연결이 커널 대기 큐(4,096)를 넘쳐 4,594건이 연결 에러였지만 백오프+지터 재시도로 모두 회복
+  - 부하를 걸면서 고친 실무형 문제: 메모리 한도에 붙은 컨테이너, 백프레셔 없는 Virtual Thread 서버의 OOM, nginx 워커 수 과다로 인한 OOM, 분산 락 lease 만료로 인한 초과 발급 1건 ([02 7장](02-architecture.md#7-인프라와-자원-제한-실측-모드), [03 REDIS_LOCK](03-issuance-strategies.md#5-redis_lock))
 
 ## Phase 5. 대기열
 - [ ] Redis ZSET 대기열, 입장 스케줄러(Redis `TIME` 기준), 입장 토큰

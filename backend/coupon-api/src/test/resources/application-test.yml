@@ -7,9 +7,16 @@ spring:
     password: root
     hikari:
       maximum-pool-size: 20
+  data:
+    redis:
+      # 개발 데이터와 이벤트 id가 겹쳐도 키가 섞이지 않게 다른 Redis DB 번호를 쓴다
+      database: 1
 
 coupon:
   issue:
     optimistic:
       # 테스트는 "재시도 초과로 인한 실패" 없이 정합성만 보려고 넉넉하게 둔다
       max-retries: 1000
+    redis-lock:
+      # 1,000명이 락 하나를 기다려도 시간 초과 없이 정합성만 보도록 넉넉하게
+      wait-ms: 60000

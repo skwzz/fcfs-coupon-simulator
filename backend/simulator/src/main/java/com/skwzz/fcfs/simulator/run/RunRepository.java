@@ -134,6 +134,23 @@ public class RunRepository {
 		return result;
 	}
 
+	/** 저장된 종료 메시지 (끝나지 않았거나 저장 전이면 비어 있음) */
+	public Optional<Messages.Done> findDone(long runId) {
+		return jdbc.sql("select result_json from simulation_run where id = ? and result_json is not null").param(runId)
+				.query(String.class).optional().map(v -> json.readValue(v, Messages.Done.class));
+	}
+
+	/** SSE users 이벤트와 같은 형식의 사용자 최종 상태 [userId, status, rank, attempts]. 요청한 적 없는 사용자는 빠진다 */
+	public List<Object[]> findUserRows(long runId) {
+		return jdbc.sql("""
+				select user_id, final_status, first_rank, attempts from simulation_user_result
+				where run_id = ? and final_status <> 'IDLE' order by user_id
+				""").param(runId)
+				.query((rs, n) -> new Object[] {rs.getInt("user_id"), rs.getString("final_status"),
+						rs.getObject("first_rank", Integer.class), rs.getInt("attempts")})
+				.list();
+	}
+
 	public Optional<Messages.UserDetail> findUser(long runId, long userId) {
 		return jdbc.sql("select final_status, timeline_json from simulation_user_result where run_id = ? and user_id = ?")
 				.params(runId, userId)
@@ -150,10 +167,13 @@ public class RunRepository {
 
 	private Messages.RunSummary summary(ResultSet rs, int rowNum) throws SQLException {
 		Messages.Done done = done(rs);
-		int counter = done == null || done.verification() == null ? 0 : done.verification().issuedQuantityCounter();
+		// 컬럼에 있는 검증 결과가 기준이고, 컬럼이 없는 값(카운터, Redis 상태)은 done 원문에서 꺼낸다
+		Verification saved = done == null ? null : done.verification();
 		Verification verification = rs.getObject("passed") == null ? null
-				: new Verification(rs.getInt("stock"), rs.getLong("issued_in_db"), counter, rs.getLong("over_issued"),
-						rs.getLong("duplicate_issued"), rs.getBoolean("passed"));
+				: new Verification(rs.getInt("stock"), rs.getLong("issued_in_db"),
+						saved == null ? 0 : saved.issuedQuantityCounter(), rs.getLong("over_issued"),
+						rs.getLong("duplicate_issued"), rs.getBoolean("passed"),
+						saved == null ? null : saved.redisStock(), saved == null ? null : saved.redisIssuedUsers());
 		Map<UserStatus, Integer> counts = rs.getString("counts_json") == null ? new EnumMap<>(UserStatus.class)
 				: readJson(rs.getString("counts_json"), COUNTS);
 		return new Messages.RunSummary(
@@ -176,6 +196,8 @@ public class RunRepository {
 				verification,
 				counts,
 				done == null || done.servedBy() == null ? Map.of() : done.servedBy(),
+				done == null ? null : done.requests(),
+				done == null ? null : done.retries(),
 				rs.getString("error"));
 	}
 

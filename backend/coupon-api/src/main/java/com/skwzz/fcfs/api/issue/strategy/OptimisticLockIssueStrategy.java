@@ -1,5 +1,6 @@
 package com.skwzz.fcfs.api.issue.strategy;
 
+import com.skwzz.fcfs.api.issue.IssueCommand;
 import com.skwzz.fcfs.api.event.CouponEvent;
 import com.skwzz.fcfs.api.issue.IssueResult;
 import com.skwzz.fcfs.common.issue.StrategyType;
@@ -43,12 +44,12 @@ class OptimisticLockIssueStrategy implements IssueStrategy {
 	}
 
 	@Override
-	public IssueResult issue(long eventId, long userId) {
+	public IssueResult issue(IssueCommand command) {
 		for (int attempt = 0; attempt <= maxRetries; attempt++) {
 			try {
 				return transactionTemplate.execute(status -> {
-					CouponEvent event = issuer.findEvent(eventId);
-					return issuer.tryIssue(event, userId, type(), event::increaseIssuedQuantity);
+					CouponEvent event = issuer.findEvent(command.eventId());
+					return issuer.tryIssue(event, command, type(), event::increaseIssuedQuantity);
 				});
 			} catch (OptimisticLockingFailureException e) {
 				retryCounter.increment();

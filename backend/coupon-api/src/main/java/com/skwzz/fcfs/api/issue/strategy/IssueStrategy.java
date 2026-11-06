@@ -1,5 +1,6 @@
 package com.skwzz.fcfs.api.issue.strategy;
 
+import com.skwzz.fcfs.api.issue.IssueCommand;
 import com.skwzz.fcfs.api.issue.IssueResult;
 import com.skwzz.fcfs.common.issue.StrategyType;
 
@@ -8,5 +9,5 @@ public interface IssueStrategy {
 
 	StrategyType type();
 
-	IssueResult issue(long eventId, long userId);
+	IssueResult issue(IssueCommand command);
 }

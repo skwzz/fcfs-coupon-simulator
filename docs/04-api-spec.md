@@ -35,7 +35,9 @@
 |---|---|---|
 | `POST` | `/events/{eventId}/issue` | 쿠폰 발급 요청 |
 
-요청 헤더: `X-User-Id`, `X-Request-Id`(멱등 키, 재시도 시 같은 값), (대기열 사용 시) `X-Queue-Token`
+요청 헤더: `X-User-Id`, `X-Request-Id`(멱등 키, 재시도 시 같은 값, 선택), (대기열 사용 시) `X-Queue-Token`
+
+**멱등 처리**: 중복으로 판정된 요청이라도, 같은 `X-Request-Id`로 이미 발급된 것이면 재시도로 보고 처음과 같은 `200 ISSUED`(`reason: "IDEMPOTENT_REPLAY"`)를 돌려줍니다. 클라이언트가 타임아웃으로 응답을 못 받았지만 서버는 발급한 경우, 재시도했을 때 "중복"이 아니라 "성공"을 보게 하기 위해서입니다. 요청 id가 다르면(연타) 그대로 `DUPLICATE`입니다.
 
 응답 헤더: 어느 API 인스턴스가 처리했는지 `X-Served-By`(예: `coupon-api-2`, 개발 모드는 `coupon-api-local`). 부하 분산이 되는지 확인하는 용도이고, 모든 응답(Actuator 포함)에 붙습니다.
 
@@ -46,7 +48,8 @@
 | 409 | `DUPLICATE` | 이미 발급받음 |
 | 410 | `SOLD_OUT` | 재고 소진 |
 | 403 | `NOT_ADMITTED` | 대기열 사용 이벤트인데 입장 토큰이 없거나 만료됨 |
-| 503 | `ERROR` | 락 타임아웃, 낙관적 락 재시도 초과(`OPTIMISTIC_RETRY_EXCEEDED`) 등 (`reason` 필드 포함) |
+| 503 | `ERROR` | `reason`: 분산 락 대기 초과(`LOCK_TIMEOUT`), 낙관적 락 재시도 초과(`OPTIMISTIC_RETRY_EXCEEDED`), Lua 판정 후 DB 저장 실패(`DB_SAVE_FAILED`, Redis는 되돌림) |
+| 500 | (ProblemDetail) | DB 커넥션을 `connection-timeout`(10초) 안에 못 받음 등 처리하지 못한 예외 |
 | 400 | (ProblemDetail) | `X-User-Id` 헤더 없음, 아직 구현되지 않은 전략 |
 | 404 | (ProblemDetail) | 이벤트 없음 |
 
@@ -110,14 +113,15 @@
   "queueEnabled": false,
   "userCount": 5000,
   "rampUpMs": 0,                // 0 = 모두 동시에 출발 (CountDownLatch)
-  "queueNotifyMode": "SSE",     // SSE | POLLING
-  "trackedUserLimit": 2000,     // 개별 상태를 스트리밍할 최대 사용자 수
-  "behavior": {                 // 사용자 행동 모델. preset만 주면 나머지는 프리셋 값
+  "queueNotifyMode": "SSE",     // SSE | POLLING (Phase 5)
+  "trackedUserLimit": 2000,     // 개별 상태를 스트리밍할 최대 사용자 수 (미구현)
+  "behavior": {                 // 사용자 행동 모델. preset만 주면 나머지는 프리셋 값, 준 항목만 덮어씀
     "preset": "REALISTIC",      // IDEAL | REALISTIC | AGGRESSIVE
     "thinkTimeMs": [0, 300],    // 버튼 누르기까지 걸리는 시간 (균등분포 범위)
-    "multiClick": { "ratio": 0.2, "clicks": 3 },          // 20%가 3번 연타
-    "retry": { "maxRetries": 2, "backoffMs": 500, "jitter": true },
-    "refreshWhileWaiting": { "ratePerMinute": 0.1 },      // 대기 중 새로고침 (순번 뒤로)
+    "multiClick": { "ratio": 0.2, "clicks": 3 },          // 20%가 3번 연타 (클릭 간격 100ms, 클릭마다 다른 요청 id)
+    "retry": { "maxRetries": 2, "backoffMs": 500, "jitter": true },  // 에러면 같은 요청 id로 재시도. 백오프는 시도마다 2배
+    "timeoutMs": 10000,         // 클라이언트가 응답을 기다리는 최대 시간. 넘기면 포기하고 에러(TIMEOUT)
+    "refreshWhileWaiting": { "ratePerMinute": 0.1 },      // 대기 중 새로고침 (순번 뒤로, Phase 5)
     "abandon": { "medianWaitSec": 60 },                   // 대기 시간이 길수록 이탈 확률 증가
     "polling": { "intervalMs": 1000, "jitterMs": 300 }
   }
@@ -126,16 +130,20 @@
 
 | 항목 | `IDEAL` | `REALISTIC` | `AGGRESSIVE` |
 |---|---|---|---|
-| 연타 | 없음 | 20%가 3번 | 60%가 5번 |
-| 재시도 | 없음 | 2회, 백오프 500ms + 지터 | 5회, 백오프 없음 |
-| 새로고침 | 없음 | 분당 0.1회 | 분당 0.5회 |
-| 이탈 | 없음 | 대기 중앙값 60초 | 없음 (끝까지 버팀) |
+| 생각 시간 | 0 | 0~300ms | 0 |
+| 연타 | 없음 | 20%가 3번 | 50%가 3번 |
+| 재시도 | 없음 | 2회, 백오프 500ms(지수) + 지터 | 3회, 백오프 없음 |
+| 타임아웃 | 30초 | 10초 | 3초 |
+| 새로고침 (Phase 5) | 없음 | 분당 0.1회 | 분당 0.5회 |
+| 이탈 (Phase 5) | 없음 | 대기 중앙값 60초 | 없음 (끝까지 버팀) |
 
-**구현 현황**: 지금은 `behavior.preset`이 `IDEAL`(또는 생략)이고 `queueEnabled`가 `false`인 경우만 받습니다. 아직 없는 기능을 요청하면 조용히 무시하지 않고 400을 돌려줍니다. 행동 모델 세부 값은 Phase 4, 대기열·`queueNotifyMode`는 Phase 5, `trackedUserLimit`은 아직 없음(사용자 1만 명까지는 전부 스트리밍).
+`AGGRESSIVE`는 처음에 60%가 5번 연타, 즉시 재시도 5회로 시작했습니다. 그 설정에서는 동시 요청이 1만 7천 개를 넘어서 nginx와 부하 생성기 자체가 먼저 무너져, 전략 비교가 아니라 인프라 붕괴만 보였습니다. 그래서 폭주는 일어나되 측정은 되는 수준으로 낮췄습니다 ([06 Phase 4 결과](06-roadmap.md#phase-4-redis-전략--사용자-행동-모델)).
+
+**구현 현황**: 대기열(`queueEnabled: true`)과 대기열 관련 행동(`refreshWhileWaiting`, `abandon`, `polling`), `queueNotifyMode`는 Phase 5입니다. `queueEnabled: true`는 400으로 거절하고, 대기열 관련 행동 값은 아직 무시합니다. `trackedUserLimit`은 아직 없음(사용자 1만 명까지는 전부 스트리밍).
 
 | 상황 | 응답 |
 |---|---|
-| 구현 전 옵션, `eventId`도 `stock`도 없음 | 400 ProblemDetail |
+| 구현 전 옵션, 행동 모델 값이 범위 밖, `eventId`도 `stock`도 없음 | 400 ProblemDetail |
 | 이벤트 생성·초기화를 위한 coupon-api 호출 실패 | 502 ProblemDetail |
 | 없는 runId | 404 ProblemDetail |
 
@@ -160,6 +168,8 @@
   "latencyMs": { "p50": 12, "p95": 85, "p99": 230 },
   "queueLength": 4100,
   "retries": 37,
+  "requests": 6120,
+  "responses": { "ISSUED": 88, "SOLD_OUT": 450, "DUPLICATE": 31, "ERROR": 49 },
   "kafkaLag": 0,
   "servedBy": { "coupon-api-1": 921, "coupon-api-2": 919 },
   "server": {
@@ -168,17 +178,18 @@
   }
 }
 ```
+- `counts`는 **사용자** 단위(현재 상태), `tps`·`latencyMs`·`requests`·`responses`는 **요청** 단위(연타·재시도 포함)입니다. 연타한 사용자는 응답이 여러 개(예: 발급 1 + 중복 2)지만 최종 상태는 하나(발급)입니다.
 - `tps`는 최근 1초 동안 끝난 요청 수, `latencyMs`는 **이번 200ms 구간에 끝난 요청**의 분포입니다. 구간에 끝난 요청이 없으면 값이 `null`입니다.
 - `stockLeft`는 simulator가 받은 성공 응답 기준입니다. 실제 판정은 `done`의 DB 검증으로 합니다.
 - `servedBy`는 인스턴스별 누적 응답 수(`X-Served-By` 기준)입니다.
 - `server`는 인스턴스별 최근 서버 지표입니다. simulator가 실행 중에 1초마다 각 인스턴스의 Actuator(`hikaricp.connections.active`, `hikaricp.connections.pending`, `process.cpu.usage`)를 로드밸런서를 거치지 않고 직접 읽습니다. 읽을 주소는 `SERVER_METRICS_URLS`로 정합니다. `cpuPercent`는 컨테이너에 할당된 CPU 기준입니다.
-- `kafkaLag`은 Phase 6부터 들어갑니다. `queueLength`, `retries`는 해당 기능 전까지 0입니다.
+- `kafkaLag`은 Phase 6부터 들어갑니다. `queueLength`는 대기열(Phase 5) 전까지 0입니다.
 
 ### `users`: 사용자 상태 변경분 (200ms마다, 바뀐 사용자만)
 ```json
-{ "changes": [ [17, "WAITING", 3214], [18, "ISSUED"], [19, "SOLD_OUT"] ] }
+{ "changes": [ [17, "WAITING", 3214, 1], [18, "ISSUED", null, 3], [19, "SOLD_OUT", null, 1] ] }
 ```
-배열 형식 `[userId, status, rank?]`으로 보내서 크기를 줄입니다. `userId`는 실행마다 1부터 매기고, 같은 구간에 상태가 여러 번 바뀌면 마지막 상태만 보냅니다. `rank`는 대기열(Phase 5)부터 붙습니다. `trackedUserLimit`을 넘는 사용자는 집계에만 반영됩니다.
+배열 형식 `[userId, status, rank, attempts]`으로 보내서 크기를 줄입니다. `attempts`는 그 사용자가 보낸 요청 수(연타·재시도 포함)입니다. `userId`는 실행마다 1부터 매기고, 같은 구간에 상태가 여러 번 바뀌면 마지막 상태만 보냅니다. `rank`는 대기열(Phase 5)부터 붙습니다. `trackedUserLimit`을 넘는 사용자는 집계에만 반영됩니다.
 
 ### `done`: 종료 + 최종 결과
 ```json
@@ -189,6 +200,8 @@
 ```
 - `state`가 `STOPPED`면 중단된 실행입니다. 중단하면 요청 중이던 사용자는 `ERROR`(`STOPPED`)가 되지만, 서버는 이미 받은 요청을 끝까지 처리하므로 DB 발급 수가 화면의 성공 수보다 클 수 있습니다.
 - `servedBy`는 인스턴스별 최종 응답 수, `serverPeak`는 인스턴스별 실행 중 최댓값(커넥션 사용·대기 수, CPU)입니다.
+- `requests`·`retries`는 전체 요청·재시도 수, `responses`는 응답 결과별 수, `errors`는 에러 사유별 수(`LOCK_TIMEOUT`, 클라이언트 `TIMEOUT`, `CONNECT_TIMEOUT` 등)입니다.
+- `verification`의 `redisStock`·`redisIssuedUsers`는 Redis 쪽 남은 재고와 발급 Set 크기입니다. `REDIS_ATOMIC`이면 `redisIssuedUsers = issuedInDb`여야 합니다.
 - `verification`을 가져오지 못하면 `null`이고 `error`에 이유가 들어갑니다. `reconciliation`은 Phase 6부터 들어갑니다.
 
 ## 6. 가상 사용자 상태 머신

@@ -65,25 +65,37 @@ Optional<CouponEvent> findByIdForUpdate(long id);
 ## 5. REDIS_LOCK
 
 ```java
-RLock lock = redisson.getLock("lock:coupon:" + eventId);
-if (!lock.tryLock(waitMs, leaseMs, MILLISECONDS)) return ERROR(LOCK_TIMEOUT);
+RLock lock = redisson.getLock("lock:coupon:{" + eventId + "}");
+if (!lock.tryLock(waitMs, MILLISECONDS)) return ERROR(LOCK_TIMEOUT);   // lease를 주지 않으면 watchdog이 자동 연장
 try { /* NAIVE와 같은 로직 (트랜잭션은 락 안에서 시작하고 끝냄) */ }
-finally { lock.unlock(); }
+finally { if (lock.isHeldByCurrentThread()) lock.unlock(); }
 ```
+
+- 대기 시간(`coupon.issue.redis-lock.wait-ms`, 기본 10초)을 넘기면 `LOCK_TIMEOUT`. 5,000명이 락 하나를 기다리면 대부분이 여기서 실패합니다.
+- **락 유지 시간(lease)을 고정하면 안 됩니다.** 처음에 lease를 5초로 두었는데, 메모리 압박으로 처리가 5초를 넘긴 순간 락이 먼저 풀려 다른 요청이 들어왔고 **초과 발급 1건**이 났습니다. 지금은 Redisson watchdog(락을 잡은 스레드가 살아 있는 동안 자동 연장, 인스턴스가 죽으면 30초 뒤 해제)을 씁니다.
+- 분산 락은 "Redis가 정확히 한 명만 통과시킨다"는 가정 위에 있어서, 락이 풀리는 시점과 실제 처리 시간이 어긋나면 깨집니다. `REDIS_ATOMIC`처럼 판정 자체를 원자적으로 만드는 쪽이 더 단단합니다.
 
 ## 6. REDIS_ATOMIC (Lua)
 
 ```lua
--- KEYS[1] = coupon:{id}:issued, KEYS[2] = coupon:{id}:stock, ARGV[1] = userId
-if redis.call('SISMEMBER', KEYS[1], ARGV[1]) == 1 then return -1 end  -- DUPLICATE
-local stock = tonumber(redis.call('GET', KEYS[2]))
-if stock <= 0 then return 0 end                                        -- SOLD_OUT
-redis.call('DECR', KEYS[2])
-redis.call('SADD', KEYS[1], ARGV[1])
+-- KEYS[1] = coupon:{id}:stock, KEYS[2] = coupon:{id}:issued, ARGV[1] = userId
+local stock = redis.call('GET', KEYS[1])
+if not stock then return -2 end                                        -- 재고 키 없음 → DB 기준으로 다시 채움
+if redis.call('SISMEMBER', KEYS[2], ARGV[1]) == 1 then return -1 end  -- DUPLICATE
+if tonumber(stock) <= 0 then return 0 end                              -- SOLD_OUT
+redis.call('DECR', KEYS[1])
+redis.call('SADD', KEYS[2], ARGV[1])
 return 1                                                               -- OK
 ```
 
-판정에 통과하면 DB에 동기로 저장합니다. DB 저장이 실패하면 Redis를 보상 처리(`INCR` + `SREM`)합니다.
+- 재고 키는 이벤트를 만들거나 초기화할 때 총 수량으로 채웁니다. Redis가 재시작되어 키가 없으면(`-2`) DB의 발급 이력으로 남은 재고와 발급 Set을 다시 채운 뒤 판정합니다(F6).
+- 판정에 통과하면 DB에 동기로 저장합니다. 락이 없고 이벤트 행(DB 카운터)도 건드리지 않아서 핫 로우 경합이 없습니다. 그래서 DB 카운터(`issued_quantity`)는 0으로 남고, 남은 재고는 Redis에서 봅니다.
+- DB 저장이 실패하면 Redis를 되돌립니다(`INCR` + `SREM`, F2). DB의 UNIQUE 제약에 걸리면(이미 발급된 사용자) 재고만 돌려주고 발급 Set은 그대로 둡니다.
+- 스크립트는 `coupon-api/src/main/resources/scripts/`에 있습니다.
+
+### 멱등 키 (`X-Request-Id`)
+
+클라이언트가 타임아웃으로 포기했지만 서버는 발급을 끝낸 경우가 있습니다. 이때 재시도가 `DUPLICATE`를 받으면 사용자는 "이미 받았다"는 이상한 화면을 봅니다. 그래서 재시도는 같은 요청 id를 쓰고, 서버는 중복으로 판정된 요청이 같은 id로 이미 발급된 것이면 `ISSUED`(`IDEMPOTENT_REPLAY`)를 돌려줍니다. 모든 전략에 공통입니다.
 
 ## 7. REDIS_KAFKA
 

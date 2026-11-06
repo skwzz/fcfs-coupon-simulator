@@ -1,6 +1,7 @@
 package com.skwzz.fcfs.simulator.run;
 
 import com.skwzz.fcfs.common.issue.StrategyType;
+import com.skwzz.fcfs.simulator.client.IssueOutcome;
 import com.skwzz.fcfs.simulator.client.Verification;
 import java.io.IOException;
 import java.time.Instant;
@@ -9,15 +10,15 @@ import java.util.BitSet;
 import java.util.EnumMap;
 import java.util.List;
 import java.util.Map;
+import java.util.TreeMap;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.ScheduledFuture;
-import java.util.concurrent.TimeUnit;
-import java.util.TreeMap;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicIntegerArray;
 import java.util.concurrent.atomic.LongAdder;
 import org.HdrHistogram.Histogram;
 import org.HdrHistogram.Recorder;
@@ -26,10 +27,11 @@ import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 /**
  * 실행 하나의 상태. 쓰는 쪽과 읽는 쪽이 나뉜다.
  * <ul>
- * <li>가상 사용자 스레드: 자기 칸의 상태를 바꾸고 changed 큐에 번호를 넣는다.</li>
+ * <li>가상 사용자 스레드: 자기 칸의 상태를 바꾸고 changed 큐에 번호를 넣는다. 연타하면 한 사용자에 스레드가 여러 개다.</li>
  * <li>ticker 스레드: 200ms마다 큐를 비워서 바뀐 사용자와 집계 지표를 SSE로 보낸다.</li>
  * </ul>
  * 사용자 배열은 큐를 거쳐 읽기 때문에, 큐에서 꺼낸 번호의 상태는 최신 값이 보인다.
+ * 지표는 요청 단위(TPS, 지연시간, 응답 종류)와 사용자 단위(최종 상태)를 나눠서 센다.
  */
 final class SimulationRun {
 
@@ -39,6 +41,7 @@ final class SimulationRun {
 	final long id;
 	final long eventId;
 	final SimulationRequest config;
+	final BehaviorModel behavior;
 	final StrategyType strategy;
 	final int stock;
 	final int userCount;
@@ -46,19 +49,24 @@ final class SimulationRun {
 
 	// 가상 사용자별 상태. 인덱스 i = userId - 1
 	private final byte[] status;
-	private final long[] requestedAtNs;
-	private final long[] completedAtNs;
-	private final String[] reason;
-	private final String[] servedBy;
-	private final Map<String, LongAdder> servedByCounts = new ConcurrentHashMap<>();
+	private final AtomicIntegerArray attempts;
+	private final long[] firstRequestNs;
+	private final long[] completedNs;
+	private final String[] lastReason;
+	private final List<List<Messages.TimelineEntry>> timelines;
 	private final ConcurrentLinkedQueue<Integer> changed = new ConcurrentLinkedQueue<>();
 
-	// 지연시간(µs). Recorder는 여러 스레드가 동시에 기록해도 되고, 구간별로 잘라서 꺼낼 수 있다
+	// 요청 단위 지표. 지연시간(µs)은 Recorder로 여러 스레드가 동시에 기록하고 구간별로 잘라서 꺼낸다
 	private final Recorder recorder = new Recorder(3);
 	private final Histogram total = new Histogram(3);
 	private final Histogram currentSecond = new Histogram(3);
 	private final List<Messages.SeriesPoint> series = new ArrayList<>();
 	private final AtomicInteger completed = new AtomicInteger();
+	private final AtomicInteger requests = new AtomicInteger();
+	private final AtomicInteger retries = new AtomicInteger();
+	private final Map<String, LongAdder> responses = new ConcurrentHashMap<>();
+	private final Map<String, LongAdder> errors = new ConcurrentHashMap<>();
+	private final Map<String, LongAdder> servedByCounts = new ConcurrentHashMap<>();
 
 	// ticker 스레드만 쓰는 값
 	private final int[] tpsWindow = new int[TPS_WINDOW];
@@ -89,14 +97,19 @@ final class SimulationRun {
 		this.id = id;
 		this.eventId = eventId;
 		this.config = config;
+		this.behavior = config.behaviorModel();
 		this.strategy = config.strategy();
 		this.stock = stock;
 		this.userCount = config.userCount();
 		this.status = new byte[userCount];
-		this.requestedAtNs = new long[userCount];
-		this.completedAtNs = new long[userCount];
-		this.reason = new String[userCount];
-		this.servedBy = new String[userCount];
+		this.attempts = new AtomicIntegerArray(userCount);
+		this.firstRequestNs = new long[userCount];
+		this.completedNs = new long[userCount];
+		this.lastReason = new String[userCount];
+		this.timelines = new ArrayList<>(userCount);
+		for (int i = 0; i < userCount; i++) {
+			timelines.add(null);
+		}
 	}
 
 	// ---- 실행 스레드, 가상 사용자 스레드 ----
@@ -105,23 +118,68 @@ final class SimulationRun {
 		startNanos = System.nanoTime();
 	}
 
-	void requesting(int i) {
-		requestedAtNs[i] = System.nanoTime();
+	/**
+	 * 요청 하나를 보내기 직전.
+	 *
+	 * @param click 연타 중 몇 번째 클릭인지 (1부터)
+	 * @param attempt 그 클릭의 몇 번째 시도인지 (1부터, 2 이상이면 재시도)
+	 */
+	void requestSent(int i, int click, int attempt) {
+		long now = System.nanoTime();
+		if (attempts.getAndIncrement(i) == 0) {
+			firstRequestNs[i] = now;
+		}
+		requests.incrementAndGet();
+		if (attempt > 1) {
+			retries.incrementAndGet();
+		}
+		String note = (click > 1 ? "클릭 " + click : "") + (attempt > 1 ? (click > 1 ? " · " : "") + "재시도 " + (attempt - 1) : "");
+		addTimeline(i, now, UserStatus.REQUESTING, attempts.get(i), note.isEmpty() ? null : note);
 		set(i, UserStatus.REQUESTING);
 	}
 
-	/** latencyNs가 음수면 지연시간 통계에 넣지 않는다 (중단으로 끊긴 요청). */
-	void complete(int i, UserStatus result, String reason, String servedBy, long latencyNs) {
-		completedAtNs[i] = System.nanoTime();
-		this.reason[i] = reason;
-		this.servedBy[i] = servedBy;
-		if (servedBy != null) {
-			servedByCounts.computeIfAbsent(servedBy, k -> new LongAdder()).increment();
+	/**
+	 * 요청 하나의 응답 (또는 클라이언트 타임아웃·연결 실패).
+	 *
+	 * @param latencyNs 음수면 지연시간 통계에 넣지 않는다 (중단으로 끊긴 요청)
+	 * @param retryInMs 0 이상이면 이 시간 뒤에 재시도한다. 그동안 사용자는 ERROR로 보인다
+	 */
+	void responseReceived(int i, IssueOutcome outcome, long latencyNs, long retryInMs) {
+		long now = System.nanoTime();
+		String result = outcome.result().name();
+		responses.computeIfAbsent(result, k -> new LongAdder()).increment();
+		if (outcome.reason() != null && UserStatus.of(outcome.result()) == UserStatus.ERROR) {
+			errors.computeIfAbsent(outcome.reason(), k -> new LongAdder()).increment();
+		}
+		if (outcome.servedBy() != null) {
+			servedByCounts.computeIfAbsent(outcome.servedBy(), k -> new LongAdder()).increment();
 		}
 		if (latencyNs >= 0) {
 			recorder.recordValue(Math.max(1, latencyNs / 1_000));
 			completed.incrementAndGet();
 		}
+		lastReason[i] = outcome.reason();
+
+		StringBuilder note = new StringBuilder();
+		if (latencyNs >= 0) {
+			note.append(latencyNs / 1_000_000).append("ms");
+		}
+		if (outcome.servedBy() != null) {
+			note.append(" · ").append(outcome.servedBy());
+		}
+		if (outcome.reason() != null) {
+			note.append(" · ").append(outcome.reason());
+		}
+		if (retryInMs >= 0) {
+			note.append(" → ").append(retryInMs).append("ms 뒤 재시도");
+			set(i, UserStatus.ERROR);
+		}
+		addTimeline(i, now, UserStatus.of(outcome.result()), attempts.get(i), note.toString());
+	}
+
+	/** 사용자의 모든 클릭(과 재시도)이 끝났을 때 최종 상태를 정한다. */
+	void userFinished(int i, UserStatus result) {
+		completedNs[i] = System.nanoTime();
 		set(i, result);
 	}
 
@@ -132,6 +190,21 @@ final class SimulationRun {
 	private void set(int i, UserStatus s) {
 		status[i] = (byte) s.ordinal();
 		changed.offer(i);
+	}
+
+	private void addTimeline(int i, long nanos, UserStatus s, int attempt, String note) {
+		List<Messages.TimelineEntry> timeline;
+		synchronized (timelines) {
+			timeline = timelines.get(i);
+			if (timeline == null) {
+				timeline = new ArrayList<>(4);
+				timeline.add(new Messages.TimelineEntry(0, UserStatus.IDLE, null, null, null));
+				timelines.set(i, timeline);
+			}
+		}
+		synchronized (timeline) {
+			timeline.add(new Messages.TimelineEntry(sinceStart(nanos), s, null, attempt, note));
+		}
 	}
 
 	void finish(RunState state, Verification verification, String error) {
@@ -146,9 +219,9 @@ final class SimulationRun {
 
 	/** @param server 이번 tick 시점의 인스턴스별 서버 지표 */
 	synchronized void tick(Map<String, Messages.ServerSample> server) {
-		boolean last = finishing;
+		boolean last = finishing; // 먼저 읽어야 마지막 사용자 변경까지 이번 tick에 담긴다
 		this.server = server;
-		server.forEach((name, sample) -> serverPeak.merge(name, sample, Messages.ServerSample::max)); // 먼저 읽어야 마지막 사용자 변경까지 이번 tick에 담긴다
+		server.forEach((name, sample) -> serverPeak.merge(name, sample, Messages.ServerSample::max));
 		List<Object[]> changes = drainChanges();
 		broadcast("tick", buildTick(last));
 		if (!changes.isEmpty()) {
@@ -171,14 +244,15 @@ final class SimulationRun {
 		for (Integer i; (i = changed.poll()) != null;) {
 			if (!seen.get(i)) {
 				seen.set(i);
-				changes.add(new Object[] {i + 1, null});
+				changes.add(userRow(i));
 			}
 		}
-		// 큐에 같은 사용자가 여러 번 있어도 마지막 상태만 보낸다
-		for (Object[] c : changes) {
-			c[1] = statusOf((Integer) c[0] - 1);
-		}
 		return changes;
+	}
+
+	/** [userId, status, rank, attempts]. rank는 대기열(Phase 5)부터 */
+	private Object[] userRow(int i) {
+		return new Object[] {i + 1, statusOf(i), null, attempts.get(i)};
 	}
 
 	private Messages.Tick buildTick(boolean last) {
@@ -194,7 +268,7 @@ final class SimulationRun {
 		for (int k = 0; k < filled; k++) {
 			sum += tpsWindow[k];
 		}
-		int tps = (int) (sum * 1000L / (filled * TICK_MS)); // 최근 1초 완료 건수
+		int tps = (int) (sum * 1000L / (filled * TICK_MS)); // 최근 1초 완료 요청 수
 
 		Map<UserStatus, Integer> counts = counts();
 		long t = elapsedMs();
@@ -202,17 +276,18 @@ final class SimulationRun {
 		if (startNanos != 0 && (tickCount % TPS_WINDOW == 0 || last)) {
 			Integer pending = server.isEmpty() ? null
 					: server.values().stream().mapToInt(Messages.ServerSample::hikariPending).sum();
-			series.add(new Messages.SeriesPoint(t, tps, latency(currentSecond), 0, pending));
+			series.add(new Messages.SeriesPoint(t, tps, latency(currentSecond), 0, pending, retries.get()));
 			currentSecond.reset();
 		}
-		return new Messages.Tick(t, stockLeft(counts), counts, tps, latency(interval), 0, 0, servedBy(), server);
+		return new Messages.Tick(t, stockLeft(counts), counts, tps, latency(interval), 0, retries.get(), requests.get(),
+				sums(responses), servedBy(), server);
 	}
 
 	private Messages.Done buildDone() {
 		long durationNs = startNanos == 0 ? 0 : endNanos - startNanos;
 		int avgTps = durationNs == 0 ? 0 : (int) (completed.get() * 1_000_000_000L / durationNs);
 		return new Messages.Done(finalState, durationNs / 1_000_000, counts(), verification, latency(total), avgTps, error,
-				servedBy(), new TreeMap<>(serverPeak));
+				servedBy(), new TreeMap<>(serverPeak), requests.get(), retries.get(), sums(responses), sums(errors));
 	}
 
 	// ---- 구독 ----
@@ -225,7 +300,7 @@ final class SimulationRun {
 			List<Object[]> all = new ArrayList<>();
 			for (int i = 0; i < userCount; i++) {
 				if (status[i] != 0) {
-					all.add(new Object[] {i + 1, statusOf(i)});
+					all.add(userRow(i));
 				}
 			}
 			emitter.send(SseEmitter.event().name("users").data(new Messages.Users(all)));
@@ -265,32 +340,37 @@ final class SimulationRun {
 	}
 
 	private List<Messages.TimelineEntry> timeline(int i) {
+		List<Messages.TimelineEntry> timeline;
+		synchronized (timelines) {
+			timeline = timelines.get(i);
+		}
+		if (timeline == null) {
+			return List.of(new Messages.TimelineEntry(0, UserStatus.IDLE, null, null, null));
+		}
+		List<Messages.TimelineEntry> copy;
+		synchronized (timeline) {
+			copy = new ArrayList<>(timeline);
+		}
 		UserStatus s = statusOf(i);
-		List<Messages.TimelineEntry> timeline = new ArrayList<>();
-		timeline.add(new Messages.TimelineEntry(0, UserStatus.IDLE, null, null));
-		if (s != UserStatus.IDLE) {
-			timeline.add(new Messages.TimelineEntry(sinceStart(requestedAtNs[i]), UserStatus.REQUESTING, null, null));
+		if (s.isFinal() && completedNs[i] != 0 && copy.getLast().status() != s) {
+			// 연타 중 마지막 응답이 최종 상태와 다르면 (예: 발급 성공 후 중복 응답) 최종 판정을 덧붙인다
+			copy.add(new Messages.TimelineEntry(sinceStart(completedNs[i]), s, null, attempts.get(i), "최종 결과"));
 		}
-		if (s.isFinal()) {
-			String note = "응답 " + latencyMs(i) + "ms" + (servedBy[i] != null ? " · " + servedBy[i] : "")
-					+ (reason[i] != null ? " · " + reason[i] : "");
-			timeline.add(new Messages.TimelineEntry(sinceStart(completedAtNs[i]), s, null, note));
-		}
-		return timeline;
+		return copy;
 	}
 
-	/** 실행이 끝난 뒤(doneFuture 완료 후)에만 부른다. 출발하지 않은 사용자(중단)도 IDLE로 남긴다. */
+	/** 실행이 끝난 뒤(doneFuture 완료 후)에만 부른다. 출발하지 않은 사용자(중단)는 IDLE로 남긴다. */
 	List<UserResult> userResults() {
 		List<UserResult> results = new ArrayList<>(userCount);
 		for (int i = 0; i < userCount; i++) {
 			UserStatus s = statusOf(i);
-			boolean requested = s != UserStatus.IDLE;
-			boolean completed = s.isFinal();
-			results.add(new UserResult(i + 1, s, requested ? 1 : 0, null,
-					requested ? (int) sinceStart(requestedAtNs[i]) : null,
-					completed ? (int) sinceStart(completedAtNs[i]) : null,
-					completed ? (int) latencyMs(i) : null,
-					reason[i], timeline(i)));
+			boolean requested = attempts.get(i) > 0;
+			boolean completed = requested && completedNs[i] != 0;
+			results.add(new UserResult(i + 1, s, attempts.get(i), null,
+					requested ? (int) sinceStart(firstRequestNs[i]) : null,
+					completed ? (int) sinceStart(completedNs[i]) : null,
+					completed ? (int) ((completedNs[i] - firstRequestNs[i]) / 1_000_000) : null,
+					lastReason[i], timeline(i)));
 		}
 		return results;
 	}
@@ -300,13 +380,13 @@ final class SimulationRun {
 		return series;
 	}
 
-	private long latencyMs(int i) {
-		return TimeUnit.NANOSECONDS.toMillis(completedAtNs[i] - requestedAtNs[i]);
+	private Map<String, Long> servedBy() {
+		return sums(servedByCounts);
 	}
 
-	private Map<String, Long> servedBy() {
+	private static Map<String, Long> sums(Map<String, LongAdder> counters) {
 		Map<String, Long> result = new TreeMap<>();
-		servedByCounts.forEach((name, count) -> result.put(name, count.sum()));
+		counters.forEach((name, count) -> result.put(name, count.sum()));
 		return result;
 	}
 

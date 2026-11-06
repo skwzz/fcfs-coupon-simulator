@@ -1,5 +1,6 @@
 package com.skwzz.fcfs.api.issue.strategy;
 
+import com.skwzz.fcfs.api.issue.IssueCommand;
 import com.skwzz.fcfs.api.issue.IssueResult;
 import com.skwzz.fcfs.common.issue.StrategyType;
 import lombok.RequiredArgsConstructor;
@@ -20,7 +21,7 @@ class NaiveIssueStrategy implements IssueStrategy {
 
 	@Override
 	@Transactional
-	public IssueResult issue(long eventId, long userId) {
-		return issuer.issueWithoutLock(eventId, userId, type());
+	public IssueResult issue(IssueCommand command) {
+		return issuer.issueWithoutLock(command, type());
 	}
 }

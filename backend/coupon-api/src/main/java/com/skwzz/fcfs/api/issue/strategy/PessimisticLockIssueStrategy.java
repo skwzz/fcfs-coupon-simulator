@@ -1,5 +1,6 @@
 package com.skwzz.fcfs.api.issue.strategy;
 
+import com.skwzz.fcfs.api.issue.IssueCommand;
 import com.skwzz.fcfs.api.common.EventNotFoundException;
 import com.skwzz.fcfs.api.event.CouponEvent;
 import com.skwzz.fcfs.api.event.CouponEventRepository;
@@ -24,9 +25,9 @@ class PessimisticLockIssueStrategy implements IssueStrategy {
 
 	@Override
 	@Transactional
-	public IssueResult issue(long eventId, long userId) {
-		CouponEvent event = eventRepository.findByIdForUpdate(eventId)
-				.orElseThrow(() -> new EventNotFoundException(eventId));
-		return issuer.tryIssue(event, userId, type(), event::increaseIssuedQuantity);
+	public IssueResult issue(IssueCommand command) {
+		CouponEvent event = eventRepository.findByIdForUpdate(command.eventId())
+				.orElseThrow(() -> new EventNotFoundException(command.eventId()));
+		return issuer.tryIssue(event, command, type(), event::increaseIssuedQuantity);
 	}
 }

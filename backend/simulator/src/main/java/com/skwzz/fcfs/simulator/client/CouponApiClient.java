@@ -54,10 +54,18 @@ public class CouponApiClient {
 		return send(request, Verification.class);
 	}
 
-	/** 발급 요청 한 번. 예외를 던지지 않고 결과(에러 포함)로 돌려준다. */
-	public IssueOutcome issue(long eventId, long userId, StrategyType strategy) throws InterruptedException {
-		var request = request("/api/events/" + eventId + "/issue?strategy=" + strategy)
+	/**
+	 * 발급 요청 한 번. 예외를 던지지 않고 결과(에러 포함)로 돌려준다.
+	 *
+	 * @param requestId 멱등 키. 같은 클릭의 재시도는 같은 값을 보낸다
+	 * @param timeout 클라이언트가 기다리는 최대 시간. 넘기면 TIMEOUT (서버는 계속 처리할 수 있다)
+	 */
+	public IssueOutcome issue(long eventId, long userId, StrategyType strategy, String requestId, Duration timeout)
+			throws InterruptedException {
+		var request = HttpRequest.newBuilder(URI.create(props.targetBaseUrl() + "/api/events/" + eventId + "/issue?strategy=" + strategy))
+				.timeout(timeout)
 				.header("X-User-Id", Long.toString(userId))
+				.header("X-Request-Id", requestId)
 				.POST(HttpRequest.BodyPublishers.noBody())
 				.build();
 		try {

@@ -22,8 +22,9 @@ public class CouponIssueController {
 	/** strategy 파라미터를 주면 이벤트의 기본 전략 대신 그 전략으로 실행한다. */
 	@PostMapping("/api/events/{eventId}/issue")
 	public ResponseEntity<IssueResponse> issue(@PathVariable long eventId, @RequestHeader("X-User-Id") long userId,
+			@RequestHeader(value = "X-Request-Id", required = false) String requestId,
 			@RequestParam(required = false) StrategyType strategy) {
-		IssueResult result = issueService.issue(eventId, userId, strategy);
+		IssueResult result = issueService.issue(new IssueCommand(eventId, userId, requestId), strategy);
 		Instant issuedAt = result.status() == IssueStatus.ISSUED ? Instant.now() : null;
 		return ResponseEntity.status(httpStatus(result.status()))
 				.body(new IssueResponse(result.status(), result.reason(), issuedAt));
