@@ -150,17 +150,31 @@
 
 ## 6. 가상 사용자 상태 머신
 
-```
-IDLE ──▶ REQUESTING ──┬──────────────────────────────▶ ISSUED / ACCEPTED
-                      │                                 SOLD_OUT / DUPLICATE / ERROR
-                      │ (대기열 ON)
-                      └──▶ WAITING(rank↓) ──▶ ADMITTED ──▶ (위와 같음)
-                               │  ▲
-                               │  └── 새로고침 (대기열 맨 뒤로 재진입)
-                               ├──▶ ABANDONED (대기 중 이탈)
-                               └──▶ SOLD_OUT (재고 소진으로 일괄 종료)
+```mermaid
+stateDiagram-v2
+    [*] --> IDLE
+    IDLE --> REQUESTING
+    REQUESTING --> judge: 대기열 OFF
+    REQUESTING --> WAITING: 대기열 ON
 
-ERROR ──(재시도 남음, 백오프 후)──▶ REQUESTING
+    WAITING --> WAITING: 순번 감소, 새로고침하면 맨 뒤로 재진입
+    WAITING --> ADMITTED: 입장 토큰 받음
+    WAITING --> ABANDONED: 대기 중 이탈
+    WAITING --> SOLD_OUT: 재고 소진으로 일괄 종료
+    ADMITTED --> judge
+
+    judge --> ISSUED
+    judge --> ACCEPTED
+    judge --> SOLD_OUT
+    judge --> DUPLICATE
+    judge --> ERROR
+
+    ERROR --> REQUESTING: 재시도 남음 (백오프 후)
+
+    %% "발급 판정"은 실제 상태가 아니라 분기 지점: 대기열 없이 바로 오거나, 입장한 뒤에 온다
+    state "발급 판정" as judge
 ```
+
+`ISSUED`, `ACCEPTED`, `SOLD_OUT`, `DUPLICATE`, `ABANDONED`는 최종 상태이고, `ERROR`는 재시도가 남아 있지 않으면 최종 상태가 됩니다.
 
 재시도는 별도 상태로 두지 않고 `REQUESTING`으로 돌아갑니다. 사용자 타임라인에는 몇 번째 시도인지(`attempt`)를 함께 기록합니다.
