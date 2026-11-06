@@ -26,36 +26,34 @@
 
 ## 2. 전체 구성도
 
-```
-                 ┌───────────────────── React Dashboard ─────────────────────┐
-                 │ 시뮬레이션 설정 · 실시간 지표 · 사용자 그리드 · 직접 참여 │
-                 └──────┬──────────────────▲─────────────────────┬───────────┘
-          REST (실행/조회)│      SSE (지표, │상태)                 │ 직접 참여 (실제 발급 API)
-                 ┌──────▼──────────────────┴───┐                 │
-                 │     simulator  (:8090)      │                 │
-                 │ 가상 사용자 N명 (Virtual     │                 │
-                 │ Thread) · 행동 모델 · 집계   │                 │
-                 └──────────────┬──────────────┘                 │
-                                │ HTTP (가상 사용자 요청)         │
-                         ┌──────▼─────────────────────────────────▼──┐
-                         │             nginx  (:8080)                │
-                         │        로드밸런서 (round robin)            │
-                         └──────┬───────────────────────┬────────────┘
-                         ┌──────▼───────┐        ┌──────▼───────┐
-                         │ coupon-api-1 │        │ coupon-api-2 │   발급 API, 대기열,
-                         │  cpu 1 / 512M│        │  cpu 1 / 512M│   IssueStrategy
-                         └──┬────┬────┬─┘        └──┬────┬────┬─┘
-                            │    │    └──── produce ┼────┼────┼──────┐
-                            │    └──────────────────┼────┘    │      │
-                     ┌──────▼──┐            ┌───────▼─┐       │  ┌───▼─────┐
-                     │  MySQL  │◀───────────│  Redis  │       │  │  Kafka  │
-                     └────▲────┘  (대사 비교) └────▲────┘       │  └───┬─────┘
-                          │                       │            │      │ consume
-                          │               ┌───────┴────────────▼──────▼──┐
-                          └───────────────│        coupon-worker         │
-                             batch insert │ Kafka Consumer · DLT 처리    │
-                                          │ 대사(reconciliation) 배치     │
-                                          └──────────────────────────────┘
+```mermaid
+flowchart TB
+    dashboard["React Dashboard<br/>설정 · 실시간 지표<br/>사용자 그리드 · 직접 참여"]
+    simulator["simulator :8090<br/>가상 사용자 N명<br/>(Virtual Thread)<br/>행동 모델 · 지표 집계"]
+    nginx["nginx :8080<br/>로드밸런서 (round robin)"]
+
+    subgraph apis["coupon-api ×2"]
+        api1["coupon-api-1<br/>발급 API · 대기열<br/>IssueStrategy<br/>cpu 1 / 512M"]
+        api2["coupon-api-2<br/>발급 API · 대기열<br/>IssueStrategy<br/>cpu 1 / 512M"]
+    end
+
+    mysql[("MySQL")]
+    redis[("Redis")]
+    kafka[["Kafka"]]
+    worker["coupon-worker<br/>Kafka Consumer<br/>DLT 처리<br/>대사(reconciliation) 배치"]
+
+    dashboard -- "REST (실행/조회)" --> simulator
+    simulator -. "SSE (지표, 상태)" .-> dashboard
+    dashboard -- "직접 참여 (실제 발급 API)" --> nginx
+    simulator -- "HTTP (가상 사용자 요청)" --> nginx
+    nginx --> api1
+    nginx --> api2
+    apis --> mysql
+    apis --> redis
+    apis -- "produce" --> kafka
+    kafka -- "consume" --> worker
+    worker -- "batch insert" --> mysql
+    worker -. "대사 비교" .-> redis
 ```
 
 | 구성요소 | 역할 |
@@ -94,30 +92,63 @@ fcfs-coupon-simulator/
 
 ## 4. 도메인 모델
 
-```
-CouponEvent                         CouponIssue
-─────────────────────────           ─────────────────────────
-id            PK                    id          PK
-name                                event_id    (FK 없음, 대량 insert 고려)
-total_quantity                      user_id
-issued_quantity  (DB 전략용)        issued_at
-version          (낙관적 락용)      strategy
-strategy         (기본 전략)        request_id  (멱등 키, Kafka 경로)
-queue_enabled                       dup_guard   (제약 우회용, 아래 참고)
-admit_per_second                    UNIQUE(event_id, user_id, dup_guard)  ← 최후 방어선
-unique_constraint_enabled
-start_at
+```mermaid
+erDiagram
+    CouponEvent ||--o{ CouponIssue : "발급 이력 (FK 없음)"
+    CouponEvent ||--o{ SimulationRun : "시뮬레이션 실행"
+    SimulationRun ||--o{ SimulationUserResult : "사용자별 결과 (선택)"
 
-SimulationRun                       SimulationUserResult (선택: 상세 저장 시)
-─────────────────────────           ─────────────────────────
-id            PK                    run_id, user_id
-event_id                            final_status, first_rank
-strategy, user_count, stock         attempts (재시도 포함 요청 횟수)
-behavior_preset, behavior_json      requested_at, completed_at, latency_ms
-status (RUNNING/DONE/FAILED)
-started_at, finished_at
-result_json   (TPS, p50/95/99, 결과별 건수, 초과/중복 발급 수)
+    CouponEvent {
+        bigint id PK
+        varchar name
+        int total_quantity
+        int issued_quantity "DB 전략용 카운터"
+        bigint version "낙관적 락"
+        varchar strategy "기본 전략"
+        boolean queue_enabled
+        int admit_per_second
+        boolean unique_constraint_enabled
+        datetime start_at
+        datetime created_at
+    }
+
+    CouponIssue {
+        bigint id PK
+        bigint event_id UK "FK 없음, 대량 insert 고려"
+        bigint user_id UK
+        bigint dup_guard UK "제약 우회용, 아래 참고"
+        varchar strategy
+        varchar request_id "멱등 키 (Kafka 경로)"
+        datetime issued_at
+    }
+
+    SimulationRun {
+        bigint id PK
+        bigint event_id FK
+        varchar strategy
+        int user_count
+        int stock
+        varchar behavior_preset
+        json behavior_json
+        varchar status "RUNNING, DONE, FAILED"
+        datetime started_at
+        datetime finished_at
+        json result_json "TPS, p50/95/99, 결과별 건수, 초과/중복 발급 수"
+    }
+
+    SimulationUserResult {
+        bigint run_id FK
+        bigint user_id
+        varchar final_status
+        int first_rank
+        int attempts "재시도 포함 요청 횟수"
+        datetime requested_at
+        datetime completed_at
+        int latency_ms
+    }
 ```
+
+`CouponIssue`의 `UK` 세 컬럼이 합쳐서 `UNIQUE(event_id, user_id, dup_guard)` 제약 하나를 이룹니다. 발급의 최후 방어선입니다.
 
 > 중복 방지 제약은 이벤트마다 **끌 수 있게** 만듭니다(`unique_constraint_enabled`).
 > 제약이 켜져 있으면 중복 발급이 DB 예외로 가려져서, "락 없는 구현"이 어떻게 깨지는지 보이지 않기 때문입니다.

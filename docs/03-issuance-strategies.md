@@ -139,16 +139,29 @@ coupon-worker가 주기적으로(예: 이벤트 진행 중 30초마다, 종료 �
 
 발급 전략과 별개로 앞단에 붙는 **유량 제어** 계층입니다. 정합성이 아니라 **서버 보호와 사용자 경험**을 위한 것입니다.
 
-```
-[사용자] ──enter──▶ ZADD queue:{id}:waiting  (score = now)
-   │                       │
-   │◀── 순번(ZRANK), 예상 대기 = 순번 / admitPerSecond
-   │
-   │     [Admission Scheduler: 1초마다]
-   │       ZPOPMIN waiting K개 → ZADD active (score = 만료시각)
-   │       → 해당 사용자에게 입장 토큰 발급 (SSE로 통지)
-   │
-   └──issue(token)──▶ active 검증 → IssueStrategy 호출 → active에서 제거
+```mermaid
+sequenceDiagram
+    autonumber
+    actor U as 사용자
+    participant API as coupon-api
+    participant S as 입장 스케줄러 (coupon-api)
+    participant R as Redis
+
+    U->>API: 대기열 진입
+    API->>R: ZADD queue:{id}:waiting (score = now)
+    API-->>U: 순번(ZRANK), 예상 대기 = 순번 / admitPerSecond
+
+    loop 1초마다
+        S->>R: ZPOPMIN waiting K개
+        S->>R: ZADD active (score = 만료 시각)
+        S-->>U: 입장 토큰 발급 (SSE로 통지)
+    end
+
+    U->>API: 발급 요청 (입장 토큰)
+    API->>R: active에 있는지 검증
+    API->>API: IssueStrategy 호출
+    API->>R: active에서 제거
+    API-->>U: 발급 결과
 ```
 
 - 순번 알림은 **SSE push**를 기본으로 하고, 폴링 방식(`GET /rank`)도 같이 제공해서 비교할 수 있게 합니다.
