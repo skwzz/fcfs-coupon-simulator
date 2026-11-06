@@ -34,6 +34,12 @@ docker compose -f infra/docker-compose.yml up -d --wait
 
 Kafka UI까지 보고 싶으면 `--profile tools`를 붙이면 됩니다(http://localhost:8085).
 
+MySQL에는 DB가 두 개 있습니다. coupon-api가 쓰는 `coupon`과 simulator가 실행 기록을 남기는 `simulation`입니다. `simulation` DB는 MySQL 컨테이너를 처음 만들 때 `infra/mysql/init`의 스크립트로 생깁니다. 이 스크립트가 생기기 전에 만든 볼륨을 쓰고 있다면 한 번만 직접 실행하세요.
+
+```bash
+docker compose -f infra/docker-compose.yml exec -T mysql mysql -uroot -proot < infra/mysql/init/01-simulation-db.sql
+```
+
 **2. 백엔드** (`backend/` 폴더에서, 각각 다른 터미널)
 
 ```bash
@@ -62,7 +68,8 @@ npm --prefix frontend install
 npm --prefix frontend run dev
 ```
 
-http://localhost:5173
+http://localhost:5173 에서 시뮬레이션 탭의 ▶ 시작을 누르면 simulator가 가상 사용자를 만들어 coupon-api에 실제 요청을 보냅니다.
+프론트 개발 서버가 `/api/simulations`는 simulator(8090)로, 나머지 `/api`는 coupon-api(8080)로 전달하므로 coupon-api와 simulator가 떠 있어야 합니다.
 
 **정리**
 

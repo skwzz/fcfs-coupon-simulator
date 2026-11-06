@@ -95,8 +95,8 @@ fcfs-coupon-simulator/
 ```mermaid
 erDiagram
     CouponEvent ||--o{ CouponIssue : "발급 이력 (FK 없음)"
-    CouponEvent ||--o{ SimulationRun : "시뮬레이션 실행"
-    SimulationRun ||--o{ SimulationUserResult : "사용자별 결과 (선택)"
+    CouponEvent ||--o{ SimulationRun : "event_id (다른 DB, FK 없음)"
+    SimulationRun ||--o{ SimulationUserResult : "사용자별 결과"
 
     CouponEvent {
         bigint id PK
@@ -123,30 +123,52 @@ erDiagram
     }
 
     SimulationRun {
-        bigint id PK
-        bigint event_id FK
+        bigint id PK "runId"
+        bigint event_id "coupon DB의 이벤트"
         varchar strategy
         int user_count
         int stock
+        int ramp_up_ms
         varchar behavior_preset
-        json behavior_json
-        varchar status "RUNNING, DONE, FAILED"
+        boolean queue_enabled
+        varchar target_base_url "개발 모드/실측 모드 구분"
+        json config_json "요청 원문"
+        varchar state "RUNNING, DONE, STOPPED, FAILED"
         datetime started_at
         datetime finished_at
-        json result_json "TPS, p50/95/99, 결과별 건수, 초과/중복 발급 수"
+        bigint duration_ms
+        int avg_tps
+        double p50_ms
+        double p95_ms
+        double p99_ms
+        double max_ms
+        bigint issued_in_db "DB 검증 결과"
+        bigint over_issued
+        bigint duplicate_issued
+        boolean passed
+        json counts_json "상태별 사용자 수"
+        json result_json "done 원문, 이후 단계 지표 포함"
+        json series_json "1초 단위 TPS·지연시간"
+        varchar error
     }
 
     SimulationUserResult {
-        bigint run_id FK
-        bigint user_id
+        bigint run_id PK
+        int user_id PK
         varchar final_status
-        int first_rank
-        int attempts "재시도 포함 요청 횟수"
-        datetime requested_at
-        datetime completed_at
+        int attempts "연타·재시도 포함 (Phase 4)"
+        int first_rank "대기열 첫 순번 (Phase 5)"
+        int requested_at_ms
+        int completed_at_ms
         int latency_ms
+        varchar reason
+        json timeline_json "상태 변화 기록"
     }
 ```
+
+`CouponEvent`와 `CouponIssue`는 coupon-api의 `coupon` DB에, `SimulationRun`과 `SimulationUserResult`는 simulator의 `simulation` DB에 있습니다. 서비스마다 자기 DB를 갖는 실무 구성을 따른 것이라 둘 사이에는 FK가 없고 `event_id` 값으로만 이어집니다.
+
+실행 기록은 비교에 쓰는 핵심 지표(TPS, p50/p95/p99, 초과·중복 발급, 통과 여부)를 컬럼으로 두고, 단계가 진행되며 늘어나는 지표(인스턴스별 처리 비율, 재시도 수, 대사 결과, Kafka lag 등)는 `result_json`에 담습니다. 그래서 이후 단계에서 지표가 늘어도 스키마를 바꾸지 않아도 됩니다.
 
 `CouponIssue`의 `UK` 세 컬럼이 합쳐서 `UNIQUE(event_id, user_id, dup_guard)` 제약 하나를 이룹니다. 발급의 최후 방어선입니다.
 
@@ -193,6 +215,7 @@ Producer/Consumer 설정과 실패 처리는 [03. 발급 전략 - 정합성 보�
 | kafka-ui (선택) | `provectuslabs/kafka-ui` | 8085 | | |
 
 - 위 수치는 출발점입니다. 노트북 코어 수에 맞춰 조정하되, **전체 합이 호스트 코어 수를 넘지 않게** 해야 컨테이너끼리 CPU를 뺏고 빼앗는 왜곡이 줄어듭니다.
+- coupon-api의 Tomcat 연결 대기 큐(`server.tomcat.accept-count`)는 2000으로 늘려 둡니다. 기본값 100이면 수천 명이 동시에 새 연결을 맺을 때 연결 거부(`ConnectException`)가 납니다. 실무에서는 앞단 로드밸런서가 이 버스트를 받아 줍니다.
 - simulator도 같은 호스트에서 돌기 때문에 절대 수치보다 **전략 간 상대 비교**에 의미를 둡니다. 부하 생성기를 다른 장비로 옮기는 것은 [확장 백로그](07-backlog.md)에 있습니다.
 
 ## 8. 측정 방식

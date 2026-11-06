@@ -76,13 +76,30 @@
 
 | Method | Path | 설명 |
 |---|---|---|
-| `POST` | `/simulations` | 시뮬레이션 시작 → `{ runId }` |
-| `GET` | `/simulations` | 실행 목록 |
-| `GET` | `/simulations/{runId}` | 결과 요약 |
+| `POST` | `/simulations` | 시뮬레이션 시작 → 202 `{ runId, eventId }` |
+| `GET` | `/simulations?limit=50` | 실행 기록 목록 (최근 것부터, 최대 200) |
+| `GET` | `/simulations/{runId}` | 설정과 결과 요약 |
 | `POST` | `/simulations/{runId}/stop` | 중단 |
 | `GET` | `/simulations/{runId}/stream` | **실시간 SSE** |
 | `GET` | `/simulations/{runId}/users/{userId}` | 사용자 한 명의 타임라인 |
-| `GET` | `/simulations/compare?ids=1,2,3` | 실행끼리 비교 |
+| `GET` | `/simulations/compare?ids=1,2,3` | 실행끼리 비교. 요약 + 1초 단위 시계열(`series`), `ids` 순서대로 |
+| `DELETE` | `/simulations/{runId}` | 실행 기록 삭제 (실행 중이면 409) |
+
+실행 기록은 simulator의 `simulation` DB에 남습니다. 시작할 때 `RUNNING`으로 한 행을 만들고(이 id가 `runId`), 끝나면 결과와 사용자별 결과를 저장합니다. simulator가 실행 도중 내려가면 다음에 뜰 때 그 실행을 `FAILED`로 바꿉니다.
+실시간 상태(SSE 구독, 진행 중인 사용자 상태)는 최근 20개 실행만 메모리에 두고, 그보다 오래된 실행의 사용자 타임라인은 DB에서 읽습니다.
+
+```jsonc
+// GET /simulations, GET /simulations/{runId} 의 원소
+{ "runId": 2, "eventId": 13, "strategy": "DB_PESSIMISTIC", "userCount": 5000, "stock": 100, "rampUpMs": 0,
+  "behaviorPreset": "IDEAL", "queueEnabled": false, "targetBaseUrl": "http://localhost:8080",
+  "state": "DONE", "startedAt": "...", "finishedAt": "...", "durationMs": 11699, "avgTps": 427,
+  "latencyMs": { "p50": 6791.2, "p95": 11173.9, "p99": 11534.3, "max": 11657.2 },
+  "verification": { "issuedInDb": 100, "overIssued": 0, "duplicateIssued": 0, "passed": true, "...": 0 },
+  "counts": { "ISSUED": 100, "SOLD_OUT": 4900, "...": 0 }, "error": null }
+
+// GET /simulations/compare?ids=2,1
+[ { "summary": { /* 위와 같음 */ }, "series": [ { "t": 1007, "tps": 38, "latencyMs": { "p50": 677.9, "...": 0 }, "queueLength": 0 } ] } ]
+```
 
 ```jsonc
 // POST /simulations
@@ -114,9 +131,23 @@
 | 새로고침 | 없음 | 분당 0.1회 | 분당 0.5회 |
 | 이탈 | 없음 | 대기 중앙값 60초 | 없음 (끝까지 버팀) |
 
+**구현 현황**: 지금은 `behavior.preset`이 `IDEAL`(또는 생략)이고 `queueEnabled`가 `false`인 경우만 받습니다. 아직 없는 기능을 요청하면 조용히 무시하지 않고 400을 돌려줍니다. 행동 모델 세부 값은 Phase 4, 대기열·`queueNotifyMode`는 Phase 5, `trackedUserLimit`은 아직 없음(사용자 1만 명까지는 전부 스트리밍).
+
+| 상황 | 응답 |
+|---|---|
+| 구현 전 옵션, `eventId`도 `stock`도 없음 | 400 ProblemDetail |
+| 이벤트 생성·초기화를 위한 coupon-api 호출 실패 | 502 ProblemDetail |
+| 없는 runId | 404 ProblemDetail |
+
 ## 5. 실시간 SSE 이벤트 포맷 (`/simulations/{runId}/stream`)
 
 사용자 1만 명의 상태 변화를 하나하나 보내면 브라우저가 감당하지 못하므로, **200ms 단위로 묶어서** 보냅니다.
+
+### `init`: 구독 직후 한 번
+```json
+{ "runId": 3, "eventId": 7, "strategy": "NAIVE", "stock": 100, "userCount": 5000, "state": "RUNNING", "t": 1200 }
+```
+`init` 바로 다음에 지금까지의 사용자 상태 전체를 `users` 이벤트 하나로 보냅니다. 그래서 늦게 구독하거나 연결이 끊겨 재연결해도 화면을 그대로 복원할 수 있습니다. 이미 끝난 실행을 구독하면 `done`까지 보내고 연결을 닫습니다.
 
 ### `tick`: 집계 지표 (200ms마다)
 ```json
@@ -134,19 +165,25 @@
   "server": { "hikariPending": 4, "hikariActive": 10 }
 }
 ```
+- `tps`는 최근 1초 동안 끝난 요청 수, `latencyMs`는 **이번 200ms 구간에 끝난 요청**의 분포입니다. 구간에 끝난 요청이 없으면 값이 `null`입니다.
+- `stockLeft`는 simulator가 받은 성공 응답 기준입니다. 실제 판정은 `done`의 DB 검증으로 합니다.
+- `servedBy`, `server`는 Phase 3, `kafkaLag`은 Phase 6부터 들어갑니다. `queueLength`, `retries`는 해당 기능 전까지 0입니다.
 
 ### `users`: 사용자 상태 변경분 (200ms마다, 바뀐 사용자만)
 ```json
 { "changes": [ [17, "WAITING", 3214], [18, "ISSUED"], [19, "SOLD_OUT"] ] }
 ```
-배열 형식 `[userId, status, rank?]`으로 보내서 크기를 줄입니다. `trackedUserLimit`을 넘는 사용자는 집계에만 반영됩니다.
+배열 형식 `[userId, status, rank?]`으로 보내서 크기를 줄입니다. `userId`는 실행마다 1부터 매기고, 같은 구간에 상태가 여러 번 바뀌면 마지막 상태만 보냅니다. `rank`는 대기열(Phase 5)부터 붙습니다. `trackedUserLimit`을 넘는 사용자는 집계에만 반영됩니다.
 
 ### `done`: 종료 + 최종 결과
 ```json
-{ "durationMs": 8123, "verification": { "issuedInDb": 100, "overIssued": 0, "duplicateIssued": 0, "passed": true },
+{ "state": "DONE", "durationMs": 8123, "counts": { "ISSUED": 100, "SOLD_OUT": 4900, "...": 0 }, "error": null,
+  "verification": { "issuedInDb": 100, "overIssued": 0, "duplicateIssued": 0, "passed": true },
   "reconciliation": { "insertedToDb": 0, "restoredToRedis": 0, "stockRecomputed": false },
   "latencyMs": { "p50": 14, "p95": 90, "p99": 260, "max": 1203 }, "avgTps": 615 }
 ```
+- `state`가 `STOPPED`면 중단된 실행입니다. 중단하면 요청 중이던 사용자는 `ERROR`(`STOPPED`)가 되지만, 서버는 이미 받은 요청을 끝까지 처리하므로 DB 발급 수가 화면의 성공 수보다 클 수 있습니다.
+- `verification`을 가져오지 못하면 `null`이고 `error`에 이유가 들어갑니다. `reconciliation`은 Phase 6부터 들어갑니다.
 
 ## 6. 가상 사용자 상태 머신
 

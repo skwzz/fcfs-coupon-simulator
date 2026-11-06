@@ -6,4 +6,13 @@ dependencies {
 	implementation 'org.springframework.boot:spring-boot-starter-webmvc'
 	implementation 'org.springframework.boot:spring-boot-starter-actuator'
 	implementation 'org.springframework.boot:spring-boot-starter-validation'
+	// 실행 기록 저장. 조회·일괄 저장 위주라 JPA 대신 JdbcClient를 쓴다
+	implementation 'org.springframework.boot:spring-boot-starter-jdbc'
+	implementation 'org.springframework.boot:spring-boot-starter-flyway'
+	implementation 'org.flywaydb:flyway-mysql'
+	runtimeOnly 'com.mysql:mysql-connector-j'
+	// 지연시간 분포(p50/p95/p99). 평균이 아니라 꼬리 지연을 보기 위해 쓴다
+	implementation 'org.hdrhistogram:HdrHistogram:2.2.2'
+
+	testImplementation 'org.springframework.boot:spring-boot-starter-test'
 }

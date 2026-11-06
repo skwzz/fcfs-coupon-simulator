@@ -2,10 +2,11 @@ import { useState } from 'react'
 import { HistoryPage } from './features/history/HistoryPage'
 import { LiveJoinPage } from './features/live-join/LiveJoinPage'
 import { SimulationPage } from './features/simulation/SimulationPage'
+import { HealthDots } from './components/HealthDots'
 
 const TABS = [
   { key: 'simulation', label: '시뮬레이션' },
-  { key: 'live', label: '직접 참여' },
+  { key: 'live', label: '직접 참여', mock: true },
   { key: 'history', label: '실행 기록 / 비교' },
 ] as const
 
@@ -21,7 +22,6 @@ export default function App() {
           <div className="flex items-center gap-2">
             <span className="text-xl">🎟</span>
             <span className="font-bold tracking-tight">FCFS Coupon Simulator</span>
-            <span className="rounded bg-amber-500/15 px-1.5 py-0.5 text-[10px] font-semibold text-amber-400">MOCKUP</span>
           </div>
           <nav className="flex gap-1">
             {TABS.map((t) => (
@@ -31,16 +31,12 @@ export default function App() {
                 className={`rounded-md px-3 py-1.5 text-sm transition ${tab === t.key ? 'bg-slate-800 text-white' : 'text-slate-400 hover:text-slate-200'}`}
               >
                 {t.label}
+                {'mock' in t && <span className="ml-1.5 rounded bg-amber-500/15 px-1 py-0.5 text-[9px] font-semibold text-amber-400">목업</span>}
               </button>
             ))}
           </nav>
           <div className="ml-auto flex items-center gap-4 text-xs text-slate-500">
-            {['MySQL', 'Redis', 'Kafka'].map((s) => (
-              <span key={s} className="flex items-center gap-1.5">
-                <span className="size-1.5 rounded-full bg-emerald-400" />
-                {s}
-              </span>
-            ))}
+            <HealthDots />
           </div>
         </div>
       </header>

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type MouseEvent as ReactMouseEvent } from 'react'
-import { STATUSES, STATUS_META, S } from '../../mock/types'
+import { DISPLAY_ORDER, STATUSES, STATUS_META, S } from '../../sim/types'
 
 // 사용자 1명 = 셀 1개. DOM 수천 개 대신 canvas로 그린다.
 export function UserGrid({
@@ -113,7 +113,7 @@ export function UserGrid({
 export function GridLegend() {
   return (
     <div className="flex flex-wrap gap-x-3 gap-y-1">
-      {STATUSES.map((s) => (
+      {DISPLAY_ORDER.map((s) => (
         <span key={s} className="flex items-center gap-1.5 text-xs text-slate-400">
           <span className="size-2.5 rounded-sm" style={{ backgroundColor: STATUS_META[s].color, outline: s === 'IDLE' ? '1px solid #334155' : undefined }} />
           {STATUS_META[s].label}
