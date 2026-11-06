@@ -6,7 +6,8 @@ import type { DoneMsg, TickMsg } from '../../sim/types'
 const COLORS = ['#38bdf8', '#f59e0b', '#22c55e', '#a78bfa']
 
 /**
- * 인스턴스별로 요청이 어떻게 나뉘었는지(X-Served-By)와 서버 측 지표(HikariCP, CPU).
+ * 인스턴스별로 요청이 어떻게 나뉘었는지(X-Served-By)와 서버 측 지표(HikariCP, CPU, 힙).
+ * 힙은 대기열 SSE 연결이 메모리를 얼마나 쓰는지 볼 때 쓴다 (연결 하나에 약 100KB).
  * 개발 모드는 coupon-api-local 하나, 실측 모드는 coupon-api-1/2 두 대가 보인다.
  */
 export function ServerPanel({ ticks, done }: { ticks: TickMsg[]; done: DoneMsg | null }) {
@@ -42,6 +43,7 @@ export function ServerPanel({ ticks, done }: { ticks: TickMsg[]; done: DoneMsg |
               <th className="pb-2">처리 비율</th>
               <th className="pb-2 text-right">DB 커넥션 사용 / 대기</th>
               <th className="pb-2 text-right">CPU</th>
+              <th className="pb-2 text-right">힙</th>
             </tr>
           </thead>
           <tbody>
@@ -81,6 +83,15 @@ export function ServerPanel({ ticks, done }: { ticks: TickMsg[]; done: DoneMsg |
                   </td>
                   <td className="py-2 text-right tabular-nums">
                     {done && peak ? <span className="text-xs text-slate-400">최대 {peak.cpuPercent}%</span> : now ? `${now.cpuPercent}%` : '-'}
+                  </td>
+                  <td className="py-2 text-right tabular-nums">
+                    {done && peak ? (
+                      <span className="text-xs text-slate-400">{peak.heapUsedMb != null ? `최대 ${fmt(peak.heapUsedMb)}MB` : '-'}</span>
+                    ) : now?.heapUsedMb != null ? (
+                      `${fmt(now.heapUsedMb)}MB`
+                    ) : (
+                      '-'
+                    )}
                   </td>
                 </tr>
               )

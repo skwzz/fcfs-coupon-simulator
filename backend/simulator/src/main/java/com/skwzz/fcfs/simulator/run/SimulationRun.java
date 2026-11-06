@@ -2,6 +2,7 @@ package com.skwzz.fcfs.simulator.run;
 
 import com.skwzz.fcfs.common.issue.StrategyType;
 import com.skwzz.fcfs.simulator.client.IssueOutcome;
+import com.skwzz.fcfs.simulator.client.QueueResponse;
 import com.skwzz.fcfs.simulator.client.Verification;
 import java.io.IOException;
 import java.time.Instant;
@@ -50,7 +51,12 @@ final class SimulationRun {
 	// 가상 사용자별 상태. 인덱스 i = userId - 1
 	private final byte[] status;
 	private final AtomicIntegerArray attempts;
+	/** 첫 요청(대기열이면 줄 서기) 시각 */
 	private final long[] firstRequestNs;
+	/** 대기열 순번. 줄에 없으면 0 */
+	private final int[] rank;
+	/** 처음 줄을 섰을 때 순번 (새로고침 전). 줄을 선 적 없으면 0 */
+	private final int[] firstRank;
 	private final long[] completedNs;
 	private final String[] lastReason;
 	private final List<List<Messages.TimelineEntry>> timelines;
@@ -67,6 +73,16 @@ final class SimulationRun {
 	private final Map<String, LongAdder> responses = new ConcurrentHashMap<>();
 	private final Map<String, LongAdder> errors = new ConcurrentHashMap<>();
 	private final Map<String, LongAdder> servedByCounts = new ConcurrentHashMap<>();
+
+	// 대기열 지표 (대기열을 쓰는 실행만). 대기 시간(ms)은 줄 선 뒤 입장하기까지
+	final boolean queued;
+	private final Recorder waitRecorder = new Recorder(3);
+	private final Histogram waitTotal = new Histogram(3);
+	private final LongAdder queueEnters = new LongAdder();
+	private final LongAdder queuePolls = new LongAdder();
+	private final LongAdder queueRefreshes = new LongAdder();
+	private final LongAdder queueAdmitted = new LongAdder();
+	private final LongAdder queueErrors = new LongAdder();
 
 	// ticker 스레드만 쓰는 값
 	private final int[] tpsWindow = new int[TPS_WINDOW];
@@ -93,8 +109,9 @@ final class SimulationRun {
 	/** ticker가 마지막 tick을 보내고 완료한다. 실행 스레드는 이걸 기다렸다가 DB에 저장한다 */
 	final CompletableFuture<Messages.Done> doneFuture = new CompletableFuture<>();
 
-	SimulationRun(long id, long eventId, SimulationRequest config, int stock) {
+	SimulationRun(long id, long eventId, SimulationRequest config, int stock, boolean queued) {
 		this.id = id;
+		this.queued = queued;
 		this.eventId = eventId;
 		this.config = config;
 		this.behavior = config.behaviorModel();
@@ -104,6 +121,8 @@ final class SimulationRun {
 		this.status = new byte[userCount];
 		this.attempts = new AtomicIntegerArray(userCount);
 		this.firstRequestNs = new long[userCount];
+		this.rank = new int[userCount];
+		this.firstRank = new int[userCount];
 		this.completedNs = new long[userCount];
 		this.lastReason = new String[userCount];
 		this.timelines = new ArrayList<>(userCount);
@@ -126,7 +145,8 @@ final class SimulationRun {
 	 */
 	void requestSent(int i, int click, int attempt) {
 		long now = System.nanoTime();
-		if (attempts.getAndIncrement(i) == 0) {
+		attempts.getAndIncrement(i);
+		if (firstRequestNs[i] == 0) {
 			firstRequestNs[i] = now;
 		}
 		requests.incrementAndGet();
@@ -134,7 +154,7 @@ final class SimulationRun {
 			retries.incrementAndGet();
 		}
 		String note = (click > 1 ? "클릭 " + click : "") + (attempt > 1 ? (click > 1 ? " · " : "") + "재시도 " + (attempt - 1) : "");
-		addTimeline(i, now, UserStatus.REQUESTING, attempts.get(i), note.isEmpty() ? null : note);
+		addTimeline(i, now, UserStatus.REQUESTING, null, attempts.get(i), note.isEmpty() ? null : note);
 		set(i, UserStatus.REQUESTING);
 	}
 
@@ -174,7 +194,72 @@ final class SimulationRun {
 			note.append(" → ").append(retryInMs).append("ms 뒤 재시도");
 			set(i, UserStatus.ERROR);
 		}
-		addTimeline(i, now, UserStatus.of(outcome.result()), attempts.get(i), note.toString());
+		addTimeline(i, now, UserStatus.of(outcome.result()), null, attempts.get(i), note.toString());
+	}
+
+	// ---- 대기열 ----
+
+	/**
+	 * 줄 서기 응답 (WAITING, 또는 바로 ADMITTED·SOLD_OUT).
+	 *
+	 * @param refresh 새로고침으로 다시 선 것인지 (순번이 뒤로 밀린다)
+	 */
+	void queueEntered(int i, QueueResponse q, boolean refresh) {
+		long now = System.nanoTime();
+		queueEnters.increment();
+		if (refresh) {
+			queueRefreshes.increment();
+		}
+		if (firstRequestNs[i] == 0) {
+			firstRequestNs[i] = now;
+		}
+		if (q.is(QueueResponse.WAITING)) {
+			if (firstRank[i] == 0) {
+				firstRank[i] = q.rank();
+			}
+			rank[i] = q.rank();
+			addTimeline(i, now, UserStatus.WAITING, q.rank(), null,
+					(refresh ? "새로고침 → 다시 줄 섬" : "줄 섬") + " · 대기 " + q.totalWaiting() + "명");
+			set(i, UserStatus.WAITING);
+		}
+	}
+
+	/** 줄 서기·폴링 요청이 실패함 (타임아웃, 연결 실패 등) */
+	void queueError(int i, String reason) {
+		queueErrors.increment();
+		errors.computeIfAbsent("QUEUE_" + reason, k -> new LongAdder()).increment();
+		lastReason[i] = "QUEUE_" + reason;
+	}
+
+	/** 폴링 한 번 (SSE 이벤트는 세지 않는다) */
+	void queuePolled() {
+		queuePolls.increment();
+	}
+
+	/** 기다리는 중 순번 변화. 타임라인에는 남기지 않고 그리드만 갱신한다 (1초마다 바뀌므로) */
+	void rankUpdated(int i, int newRank) {
+		if (rank[i] != newRank) {
+			rank[i] = newRank;
+			changed.offer(i);
+		}
+	}
+
+	/** 입장. 이제 발급을 요청할 수 있다 */
+	void admitted(int i, long queueStartNs) {
+		long now = System.nanoTime();
+		queueAdmitted.increment();
+		long waitMs = (now - queueStartNs) / 1_000_000;
+		waitRecorder.recordValue(Math.max(1, (now - queueStartNs) / 1_000)); // 지연시간과 같은 µs 단위
+		rank[i] = 0;
+		addTimeline(i, now, UserStatus.ADMITTED, null, null, "대기 " + String.format("%.1f", waitMs / 1000.0) + "초");
+		set(i, UserStatus.ADMITTED);
+	}
+
+	/** 대기 중에 끝남: 이탈, 매진 통지 */
+	void queueFinished(int i, UserStatus status, String note) {
+		rank[i] = 0;
+		addTimeline(i, System.nanoTime(), status, null, null, note);
+		userFinished(i, status);
 	}
 
 	/** 사용자의 모든 클릭(과 재시도)이 끝났을 때 최종 상태를 정한다. */
@@ -192,7 +277,7 @@ final class SimulationRun {
 		changed.offer(i);
 	}
 
-	private void addTimeline(int i, long nanos, UserStatus s, int attempt, String note) {
+	private void addTimeline(int i, long nanos, UserStatus s, Integer rank, Integer attempt, String note) {
 		List<Messages.TimelineEntry> timeline;
 		synchronized (timelines) {
 			timeline = timelines.get(i);
@@ -203,7 +288,7 @@ final class SimulationRun {
 			}
 		}
 		synchronized (timeline) {
-			timeline.add(new Messages.TimelineEntry(sinceStart(nanos), s, null, attempt, note));
+			timeline.add(new Messages.TimelineEntry(sinceStart(nanos), s, rank, attempt, note));
 		}
 	}
 
@@ -238,21 +323,27 @@ final class SimulationRun {
 		}
 	}
 
+	/**
+	 * 바뀐 사용자를 모두 꺼낸 뒤에 상태를 읽는다.
+	 * 꺼내자마자 읽으면, 같은 사용자의 앞선 변경(순번 갱신)을 꺼낸 시점에는 그 뒤에 쓴 최종 상태가 아직 안 보일 수 있다.
+	 * 그런데 뒤의 변경은 "이미 본 사용자"라 건너뛰므로 화면에 옛 상태가 남는다 (대기열에서 재현, docs/06 Phase 5).
+	 * 큐에서 마지막으로 꺼낸 것보다 먼저 쓴 값은 보이는 게 보장되므로, 다 꺼낸 다음에 읽으면 최신 상태가 나간다.
+	 */
 	private List<Object[]> drainChanges() {
 		BitSet seen = new BitSet(userCount);
-		List<Object[]> changes = new ArrayList<>();
 		for (Integer i; (i = changed.poll()) != null;) {
-			if (!seen.get(i)) {
-				seen.set(i);
-				changes.add(userRow(i));
-			}
+			seen.set(i);
+		}
+		List<Object[]> changes = new ArrayList<>(seen.cardinality());
+		for (int i = seen.nextSetBit(0); i >= 0; i = seen.nextSetBit(i + 1)) {
+			changes.add(userRow(i));
 		}
 		return changes;
 	}
 
-	/** [userId, status, rank, attempts]. rank는 대기열(Phase 5)부터 */
+	/** [userId, status, rank, attempts]. rank는 대기 중일 때만 */
 	private Object[] userRow(int i) {
-		return new Object[] {i + 1, statusOf(i), null, attempts.get(i)};
+		return new Object[] {i + 1, statusOf(i), rank[i] == 0 ? null : rank[i], attempts.get(i)};
 	}
 
 	private Messages.Tick buildTick(boolean last) {
@@ -276,18 +367,27 @@ final class SimulationRun {
 		if (startNanos != 0 && (tickCount % TPS_WINDOW == 0 || last)) {
 			Integer pending = server.isEmpty() ? null
 					: server.values().stream().mapToInt(Messages.ServerSample::hikariPending).sum();
-			series.add(new Messages.SeriesPoint(t, tps, latency(currentSecond), 0, pending, retries.get()));
+			series.add(new Messages.SeriesPoint(t, tps, latency(currentSecond), counts.get(UserStatus.WAITING), pending,
+					retries.get()));
 			currentSecond.reset();
 		}
-		return new Messages.Tick(t, stockLeft(counts), counts, tps, latency(interval), 0, retries.get(), requests.get(),
+		if (queued) {
+			waitTotal.add(waitRecorder.getIntervalHistogram());
+		}
+		return new Messages.Tick(t, stockLeft(counts), counts, tps, latency(interval), counts.get(UserStatus.WAITING),
+				retries.get(), requests.get(),
 				sums(responses), servedBy(), server);
 	}
 
 	private Messages.Done buildDone() {
 		long durationNs = startNanos == 0 ? 0 : endNanos - startNanos;
 		int avgTps = durationNs == 0 ? 0 : (int) (completed.get() * 1_000_000_000L / durationNs);
+		Messages.QueueStats queue = !queued ? null
+				: new Messages.QueueStats(queueEnters.intValue(), queuePolls.intValue(), queueRefreshes.intValue(),
+						counts().get(UserStatus.ABANDONED), queueAdmitted.intValue(), queueErrors.intValue(),
+						latency(waitTotal), config.admitRate(), config.notifyMode().name());
 		return new Messages.Done(finalState, durationNs / 1_000_000, counts(), verification, latency(total), avgTps, error,
-				servedBy(), new TreeMap<>(serverPeak), requests.get(), retries.get(), sums(responses), sums(errors));
+				servedBy(), new TreeMap<>(serverPeak), requests.get(), retries.get(), sums(responses), sums(errors), queue);
 	}
 
 	// ---- 구독 ----
@@ -364,9 +464,9 @@ final class SimulationRun {
 		List<UserResult> results = new ArrayList<>(userCount);
 		for (int i = 0; i < userCount; i++) {
 			UserStatus s = statusOf(i);
-			boolean requested = attempts.get(i) > 0;
+			boolean requested = firstRequestNs[i] != 0;
 			boolean completed = requested && completedNs[i] != 0;
-			results.add(new UserResult(i + 1, s, attempts.get(i), null,
+			results.add(new UserResult(i + 1, s, attempts.get(i), firstRank[i] == 0 ? null : firstRank[i],
 					requested ? (int) sinceStart(firstRequestNs[i]) : null,
 					completed ? (int) sinceStart(completedNs[i]) : null,
 					completed ? (int) ((completedNs[i] - firstRequestNs[i]) / 1_000_000) : null,

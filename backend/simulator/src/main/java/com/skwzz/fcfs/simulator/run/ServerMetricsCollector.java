@@ -66,8 +66,10 @@ public class ServerMetricsCollector {
 			var active = executor.submit(() -> api.metric(url, "hikaricp.connections.active"));
 			var pending = executor.submit(() -> api.metric(url, "hikaricp.connections.pending"));
 			var cpu = executor.submit(() -> api.metric(url, "process.cpu.usage"));
+			var heap = executor.submit(() -> api.metric(url, "jvm.memory.used?tag=area:heap"));
 			latest.put(active.get().servedBy(), new Messages.ServerSample((int) active.get().value(),
-					(int) pending.get().value(), Math.round(cpu.get().value() * 1000) / 10.0));
+					(int) pending.get().value(), Math.round(cpu.get().value() * 1000) / 10.0,
+					(int) (heap.get().value() / (1024 * 1024))));
 		} catch (Exception e) {
 			// 지표는 보조 정보라 실패해도 실행에는 영향을 주지 않는다
 			log.info("server metrics from {} failed: {}", url, e.toString());

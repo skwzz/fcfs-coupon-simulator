@@ -33,8 +33,8 @@ flowchart TB
     nginx["nginx :8080<br/>로드밸런서 (round robin)"]
 
     subgraph apis["coupon-api ×2"]
-        api1["coupon-api-1<br/>발급 API · 대기열<br/>IssueStrategy<br/>cpu 1 / 512M"]
-        api2["coupon-api-2<br/>발급 API · 대기열<br/>IssueStrategy<br/>cpu 1 / 512M"]
+        api1["coupon-api-1<br/>발급 API · 대기열<br/>IssueStrategy<br/>cpu 1 / 1.5G"]
+        api2["coupon-api-2<br/>발급 API · 대기열<br/>IssueStrategy<br/>cpu 1 / 1.5G"]
     end
 
     mysql[("MySQL")]
@@ -192,8 +192,11 @@ erDiagram
 |---|---|---|
 | `coupon:{eventId}:stock` | String(int) | 남은 재고 (DECR) |
 | `coupon:{eventId}:issued` | Set | 발급받은 userId (중복 방지) |
-| `queue:{eventId}:waiting` | Sorted Set | 대기열, score = 진입 시각(ns) |
-| `queue:{eventId}:active` | Sorted Set | 입장한 사용자, score = 토큰 만료 시각 |
+| `queue:{eventId}:waiting` | Sorted Set | 대기열, score = 진입 시각(µs, Redis `TIME`) |
+| `queue:{eventId}:active` | Sorted Set | 입장한 사용자, score = 토큰 만료 시각(ms) |
+| `queue:{eventId}:tokens` | Hash | userId → 입장 토큰. 만료돼도 남겨서 "만료"와 "줄 선 적 없음"을 구분 |
+| `queue:{eventId}:meta` | Hash | 초당 입장 수, 토큰 유효 시간, 마지막 입장 기준 시각, 입장 누적 수, 매진으로 닫혔는지 |
+| `queue:events` | Set | 입장 스케줄러가 돌아야 하는 이벤트 id. 이벤트를 가로지르는 키라 해시태그 없음 |
 | `lock:coupon:{eventId}` | (Redisson) | 분산 락 전략용 |
 
 - `{eventId}` 중괄호는 Redis Cluster의 **해시태그**입니다. 같은 이벤트의 키가 같은 노드에 모이기 때문에, 나중에 클러스터로 바꿔도 여러 키를 다루는 Lua 스크립트가 그대로 동작합니다.
@@ -216,19 +219,26 @@ Producer/Consumer 설정과 실패 처리는 [03. 발급 전략 - 정합성 보�
 | mysql | `mysql:8.4` | 3306 | cpu 1, 1G | `max_connections=100` |
 | redis | `redis:7.4` | 6379 | cpu 0.5, 256M | `appendonly yes` |
 | kafka | `apache/kafka:3.8.0` (KRaft, 단일 브로커) | 9092 | cpu 1, 1G | |
-| nginx | `nginx:1.27` | 8080 | cpu 0.5, 256M | 워커 1개, `worker_connections 16384`, round robin, keepalive |
-| coupon-api ×2 | 직접 빌드 | (내부) | 각 cpu 1, 1G (힙 50%) | HikariCP `maximumPoolSize=10`·`connection-timeout 10s`, Tomcat `max-connections 1000`·`accept-count 2000`, Virtual Thread |
+| nginx | `nginx:1.27` | 8080 | cpu 0.5, 256M | 워커 1개, `worker_connections 32768`, `backlog 16384`(`somaxconn` 16384), round robin, keepalive, `max_fails=0`, 대기열 SSE는 버퍼링 끔 |
+| coupon-api ×2 | 직접 빌드 | (내부) | 각 cpu 1, 1.5G (힙 60%) | HikariCP `maximumPoolSize=10`·`connection-timeout 10s`, Tomcat `max-connections 10000`·`accept-count 8192`(`somaxconn` 8192), 발급 벌크헤드 처리 1000 + 대기 2000, Virtual Thread |
 | coupon-worker | 직접 빌드 | (내부) | cpu 0.5, 384M | |
 | simulator | 직접 빌드 | 8090 | cpu 2, 1.5G (힙 60%) | |
 | kafka-ui (선택) | `provectuslabs/kafka-ui` | 8085 | | |
 
 - 위 수치는 출발점입니다. 노트북 코어 수에 맞춰 조정하되, **전체 합이 호스트 코어 수를 넘지 않게** 해야 컨테이너끼리 CPU를 뺏고 빼앗는 왜곡이 줄어듭니다.
-- coupon-api의 Tomcat 연결 대기 큐(`server.tomcat.accept-count`)는 2000으로 늘려 둡니다. 기본값 100이면 수천 명이 동시에 새 연결을 맺을 때 연결 거부(`ConnectException`)가 납니다. 실무에서는 앞단 로드밸런서가 이 버스트를 받아 줍니다.
+- coupon-api의 Tomcat 연결 대기 큐(`server.tomcat.accept-count`)는 기본값 100이면 수천 명이 동시에 새 연결을 맺을 때 연결 거부(`ConnectException`)가 납니다. 실무에서는 앞단 로드밸런서가 이 버스트를 받아 줍니다. 이 값은 커널의 `net.core.somaxconn`(컨테이너 기본 4096)을 넘을 수 없어서, 크게 쓰려면 컨테이너 `sysctls`도 같이 올려야 합니다.
 - 처음 수치(nginx 128M, coupon-api 512M, simulator 1G)에서 Phase 4 부하를 걸어 보고 고친 값입니다. 고친 이유는 모두 실무에서 자주 겪는 문제입니다.
   - **coupon-api 512M → 1G, 힙 75% → 50%**: Redisson을 넣은 뒤 유휴 상태에서도 메모리 한도에 붙어 처리량이 절반 이하로 떨어졌습니다. 동시 연결 수천 개의 소켓 버퍼와 Netty 직접 메모리는 힙 밖에서 쓰므로 힙 비율을 낮춰 자리를 남깁니다.
   - **Tomcat `max-connections` 8192 → 1000, Hikari `connection-timeout` 30초 → 10초**: Virtual Thread는 스레드 수 제한이 없어서 요청을 받는 대로 다 받습니다. 재시도 폭주 때 커넥션을 기다리는 요청이 힙을 채워 OOM이 났고, OOM 뒤에는 GC만 돌면서 회복하지 못했습니다. 동시 처리 수를 제한하고 오래 기다리는 요청은 빨리 실패시키는 백프레셔가 필요합니다.
   - **nginx `worker_processes auto` → 1, 128M → 256M**: `auto`는 컨테이너 CPU 제한이 아니라 호스트 코어 수(20)만큼 워커를 띄워서 메모리 한도를 넘고 워커가 OOM으로 죽었습니다. `worker_connections`도 상한을 둬서 넘치는 연결은 바로 끊습니다.
   - **simulator 1G → 1.5G**: 동시 연결 1만 개 이상에서 부하 생성기가 먼저 한계에 닿으면 측정이 왜곡됩니다.
+- Phase 5에서 대기열 SSE(사용자마다 연결을 오래 잡는다)를 1만 명으로 돌려 보고 다시 고친 값입니다. 결과는 [06 Phase 5](06-roadmap.md#phase-5-대기열)에 있습니다.
+  - **coupon-api 1G → 1.5G, 힙 50% → 60%**: Tomcat은 연결마다 요청·응답 버퍼를 잡아서 SSE 연결 하나에 힙 약 100KB를 씁니다. 인스턴스당 5천 연결에서 힙 512MB가 `OutOfMemoryError`로 죽었습니다. 실무에서 대기열을 따로 떼어 Netty 같은 이벤트 루프 서버로 돌리거나, 폴링 간격을 서버가 정하는 방식을 쓰는 이유입니다 ([07 B1](07-backlog.md#b1-서명된-입장-토큰--대기열-분리-)).
+  - **Tomcat `max-connections` 1000 → 10000 + 발급 벌크헤드**: 1000이면 SSE가 연결을 다 차지해서 발급 요청이 들어오지 못합니다. 연결 한도는 크게 열고, 무거운 발급 처리만 따로 제한합니다(`IssueBulkhead`: 처리 1000, 대기 2000, 넘치면 바로 503 `OVERLOADED`). Phase 4의 max-connections 1000 + accept-count 2000과 같은 크기입니다. 대기 줄 길이를 정하지 않았을 때는 재시도 폭주에서 요청이 전부 서버 안에서 기다리면서 nginx 연결까지 다 잡아, 새 연결을 아예 못 받았습니다.
+  - **`accept-count` 2000 → 8192, 컨테이너 `somaxconn` 8192**: 1만 명이 몇 초 안에 연결하면 커널 대기 큐가 넘쳐 nginx가 API에 연결하지 못하고 504가 났습니다.
+  - **nginx `worker_connections` 16384 → 32768, `backlog` 8192 → 16384**: SSE 하나가 nginx 연결 2개(클라이언트 쪽, API 쪽)를 계속 잡으므로 1만 명 대기만으로 2만 개를 씁니다.
+  - **nginx `max_fails=0`**: 기본값(1)이면 과부하로 연결이 한 번 늦기만 해도 그 인스턴스를 10초간 빼고, 두 대가 다 빠지면 모든 요청이 바로 502가 됩니다(`no live upstreams`). 장애가 아니라 과부하인데 남은 한 대로 부하를 몰아 연쇄로 무너뜨리는 셈이라, 서버 2대 구성에서는 끄고 헬스체크는 Docker에 맡깁니다.
+  - **nginx 설정 파일만 바꾸면 다시 읽지 않는다**: `docker compose up`은 마운트한 파일 내용이 바뀐 것을 모르므로 `docker compose restart nginx`가 필요합니다. 처음에 이걸 놓쳐서 연결 한도가 그대로였고, 실행마다 똑같이 2,384명이 연결에 실패했습니다.
 - simulator도 같은 호스트에서 돌기 때문에 절대 수치보다 **전략 간 상대 비교**에 의미를 둡니다. 부하 생성기를 다른 장비로 옮기는 것은 [확장 백로그](07-backlog.md)에 있습니다.
 
 ## 8. 측정 방식

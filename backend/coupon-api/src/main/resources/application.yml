@@ -5,10 +5,10 @@ server:
     # 수천 명이 동시에 새 연결을 맺으면 기본 대기 큐(100)가 넘쳐서 연결 거부가 난다.
     # 실무에서는 앞단 로드밸런서가 이 버스트를 받아 주므로, 개발 모드에서는 큐를 넉넉히 둔다.
     accept-count: ${ACCEPT_COUNT:2000}
-    # 동시에 처리하는 연결 상한. Virtual Thread는 스레드 수 제한이 없어서 이 값이 사실상 동시 요청 상한이다.
-    # 넘치는 연결은 OS 대기 큐(accept-count)에서 기다리고, 그것도 넘치면 거절된다 (백프레셔).
-    # 크게 두면 재시도 폭주 때 커넥션을 기다리는 요청이 힙을 다 채워 OOM으로 멈춘다 (4096에서 재현, docs/06 Phase 4 결과)
-    max-connections: ${MAX_CONNECTIONS:1000}
+    # 동시에 열어 둘 수 있는 연결 상한. 대기열 SSE는 순번을 기다리는 동안 연결을 계속 잡고 있어서 크게 연다.
+    # Phase 4까지는 1000으로 두고 발급 동시성 제한(백프레셔)도 이 값에 맡겼는데, 그러면 SSE가 연결을 다 차지해
+    # 발급 요청이 들어오지 못한다. 그래서 발급 동시성은 coupon.issue.max-concurrent(IssueBulkhead)로 따로 제한한다
+    max-connections: ${MAX_CONNECTIONS:10000}
 
 spring:
   application:
@@ -39,6 +39,23 @@ spring:
 app:
   # 응답 헤더 X-Served-By에 넣을 인스턴스 이름. 실측 모드에서는 coupon-api-1, coupon-api-2
   instance-id: ${INSTANCE_ID:coupon-api-local}
+
+coupon:
+  issue:
+    # 인스턴스 하나가 동시에 처리하는 발급 요청 수 (IssueBulkhead). 넘치면 자리가 날 때까지 기다린다.
+    # 크게 두면 재시도 폭주 때 DB 커넥션을 기다리는 요청이 힙을 다 채워 OOM으로 멈춘다 (4096에서 재현, docs/06 Phase 4 결과)
+    max-concurrent: ${ISSUE_MAX_CONCURRENT:1000}
+    # 자리를 기다리는 요청 수 상한. 넘치면 기다리지 않고 바로 503 OVERLOADED (Phase 4의 accept-count 2000과 같은 크기)
+    max-waiting: ${ISSUE_MAX_WAITING:2000}
+    # 자리를 이 시간 안에 못 얻어도 503 OVERLOADED
+    bulkhead-wait-ms: 60000
+  queue:
+    # 입장 토큰 유효 시간. 입장한 뒤 이 시간 안에 발급을 요청해야 한다
+    token-ttl-ms: 30000
+    # 입장 스케줄러 주기. 짧을수록 1초 안에서도 고르게 입장한다 (입장 수는 Redis 시계 기준이라 주기와 무관)
+    admit-interval-ms: 100
+    # SSE로 순번을 보내는 주기
+    push-interval-ms: 1000
 
 management:
   endpoints:
