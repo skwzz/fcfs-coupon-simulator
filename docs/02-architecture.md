@@ -76,6 +76,7 @@ fcfs-coupon-simulator/
 ├── infra/
 │   ├── docker-compose.yml       # 인프라: mysql, redis, kafka
 │   ├── docker-compose.app.yml   # 앱: nginx, coupon-api ×2, coupon-worker, simulator (자원 제한 포함)
+│   ├── mysql/init/              # MySQL 첫 기동 시 실행 (simulation DB 생성)
 │   └── nginx/nginx.conf
 ├── loadtest/            # (확장) k6 스크립트
 └── docs/
@@ -87,6 +88,13 @@ fcfs-coupon-simulator/
 |---|---|---|
 | **개발 모드** | 인프라만 Docker, 앱은 IDE에서 실행 (API 1대) | 기능 개발, 디버깅 |
 | **실측 모드** | `docker-compose.yml` + `docker-compose.app.yml` 모두 Docker로 실행 | 전략 비교, 수치 측정, 시연 |
+
+```bash
+# 실측 모드: 인프라 + 앱 전체를 Docker로 (개발 모드로 띄운 앱은 먼저 내린다)
+docker compose -f infra/docker-compose.yml -f infra/docker-compose.app.yml up -d --build --wait
+```
+
+두 모드 모두 외부에서 보는 포트(API 8080, simulator 8090)가 같아서 프론트엔드는 그대로 씁니다. 실측 모드에서는 8080이 nginx입니다.
 
 수치 비교는 항상 **실측 모드**에서 합니다. 개발 모드의 수치는 IDE와 디버거 영향을 받기 때문에 비교 대상이 아닙니다.
 

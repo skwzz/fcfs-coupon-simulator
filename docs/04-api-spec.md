@@ -37,7 +37,7 @@
 
 요청 헤더: `X-User-Id`, `X-Request-Id`(멱등 키, 재시도 시 같은 값), (대기열 사용 시) `X-Queue-Token`
 
-응답 헤더: 어느 API 인스턴스가 처리했는지 `X-Served-By`(예: `coupon-api-2`). 부하 분산이 되는지 확인하는 용도입니다.
+응답 헤더: 어느 API 인스턴스가 처리했는지 `X-Served-By`(예: `coupon-api-2`, 개발 모드는 `coupon-api-local`). 부하 분산이 되는지 확인하는 용도이고, 모든 응답(Actuator 포함)에 붙습니다.
 
 | HTTP | `result` | 의미 |
 |---|---|---|
@@ -162,12 +162,17 @@
   "retries": 37,
   "kafkaLag": 0,
   "servedBy": { "coupon-api-1": 921, "coupon-api-2": 919 },
-  "server": { "hikariPending": 4, "hikariActive": 10 }
+  "server": {
+    "coupon-api-1": { "hikariActive": 10, "hikariPending": 412, "cpuPercent": 87.5 },
+    "coupon-api-2": { "hikariActive": 10, "hikariPending": 398, "cpuPercent": 91.2 }
+  }
 }
 ```
 - `tps`는 최근 1초 동안 끝난 요청 수, `latencyMs`는 **이번 200ms 구간에 끝난 요청**의 분포입니다. 구간에 끝난 요청이 없으면 값이 `null`입니다.
 - `stockLeft`는 simulator가 받은 성공 응답 기준입니다. 실제 판정은 `done`의 DB 검증으로 합니다.
-- `servedBy`, `server`는 Phase 3, `kafkaLag`은 Phase 6부터 들어갑니다. `queueLength`, `retries`는 해당 기능 전까지 0입니다.
+- `servedBy`는 인스턴스별 누적 응답 수(`X-Served-By` 기준)입니다.
+- `server`는 인스턴스별 최근 서버 지표입니다. simulator가 실행 중에 1초마다 각 인스턴스의 Actuator(`hikaricp.connections.active`, `hikaricp.connections.pending`, `process.cpu.usage`)를 로드밸런서를 거치지 않고 직접 읽습니다. 읽을 주소는 `SERVER_METRICS_URLS`로 정합니다. `cpuPercent`는 컨테이너에 할당된 CPU 기준입니다.
+- `kafkaLag`은 Phase 6부터 들어갑니다. `queueLength`, `retries`는 해당 기능 전까지 0입니다.
 
 ### `users`: 사용자 상태 변경분 (200ms마다, 바뀐 사용자만)
 ```json
@@ -183,6 +188,7 @@
   "latencyMs": { "p50": 14, "p95": 90, "p99": 260, "max": 1203 }, "avgTps": 615 }
 ```
 - `state`가 `STOPPED`면 중단된 실행입니다. 중단하면 요청 중이던 사용자는 `ERROR`(`STOPPED`)가 되지만, 서버는 이미 받은 요청을 끝까지 처리하므로 DB 발급 수가 화면의 성공 수보다 클 수 있습니다.
+- `servedBy`는 인스턴스별 최종 응답 수, `serverPeak`는 인스턴스별 실행 중 최댓값(커넥션 사용·대기 수, CPU)입니다.
 - `verification`을 가져오지 못하면 `null`이고 `error`에 이유가 들어갑니다. `reconciliation`은 Phase 6부터 들어갑니다.
 
 ## 6. 가상 사용자 상태 머신

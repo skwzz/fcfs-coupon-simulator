@@ -91,6 +91,17 @@ export interface TickMsg {
   latencyMs: Latency
   queueLength: number
   retries: number
+  /** 인스턴스별 누적 응답 수 (X-Served-By) */
+  servedBy: Record<string, number>
+  /** 인스턴스별 최근 서버 지표 */
+  server: Record<string, ServerSample>
+}
+
+export interface ServerSample {
+  hikariActive: number
+  hikariPending: number
+  /** 컨테이너에 할당된 CPU 기준 % */
+  cpuPercent: number
 }
 
 export interface UsersMsg {
@@ -116,6 +127,8 @@ export interface DoneMsg {
   latencyMs: Latency
   avgTps: number
   error: string | null
+  servedBy: Record<string, number> | null
+  serverPeak: Record<string, ServerSample> | null
 }
 
 export interface TimelineEntry {
@@ -151,6 +164,7 @@ export interface RunSummary {
   latencyMs: Latency
   verification: Verification | null
   counts: Partial<Record<Status, number>>
+  servedBy: Record<string, number>
   error: string | null
 }
 
@@ -159,6 +173,7 @@ export interface SeriesPoint {
   tps: number
   latencyMs: Latency
   queueLength: number
+  hikariPending: number | null
 }
 
 export interface Comparison {

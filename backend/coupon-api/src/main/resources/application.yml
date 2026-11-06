@@ -30,6 +30,10 @@ spring:
   kafka:
     bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
 
+app:
+  # 응답 헤더 X-Served-By에 넣을 인스턴스 이름. 실측 모드에서는 coupon-api-1, coupon-api-2
+  instance-id: ${INSTANCE_ID:coupon-api-local}
+
 management:
   endpoints:
     web:

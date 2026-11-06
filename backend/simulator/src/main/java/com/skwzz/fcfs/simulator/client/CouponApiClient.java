@@ -10,9 +10,11 @@ import java.net.http.HttpConnectTimeoutException;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.net.http.HttpTimeoutException;
+import java.time.Duration;
 import java.util.concurrent.Executors;
 import org.springframework.stereotype.Component;
 import tools.jackson.core.JacksonException;
+import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.json.JsonMapper;
 
 /**
@@ -21,6 +23,8 @@ import tools.jackson.databind.json.JsonMapper;
  */
 @Component
 public class CouponApiClient {
+
+	public static final String SERVED_BY = "X-Served-By";
 
 	private final HttpClient http;
 	private final JsonMapper json;
@@ -58,7 +62,8 @@ public class CouponApiClient {
 				.build();
 		try {
 			HttpResponse<String> response = http.send(request, HttpResponse.BodyHandlers.ofString());
-			return IssueOutcome.from(response.statusCode(), parseIssue(response.body()));
+			String servedBy = response.headers().firstValue(SERVED_BY).orElse(null);
+			return IssueOutcome.from(response.statusCode(), parseIssue(response.body()), servedBy);
 		} catch (HttpConnectTimeoutException e) {
 			return IssueOutcome.clientError("CONNECT_TIMEOUT");
 		} catch (HttpTimeoutException e) {
@@ -66,6 +71,28 @@ public class CouponApiClient {
 		} catch (IOException e) {
 			return IssueOutcome.clientError("IO_" + e.getClass().getSimpleName());
 		}
+	}
+
+	/**
+	 * 인스턴스 하나의 Actuator 지표 값 (예: hikaricp.connections.pending).
+	 * 로드밸런서를 거치지 않고 baseUrl의 인스턴스에 직접 묻는다.
+	 */
+	public MetricValue metric(String baseUrl, String name) throws IOException, InterruptedException {
+		var request = HttpRequest.newBuilder(URI.create(baseUrl + "/actuator/metrics/" + name))
+				.timeout(Duration.ofSeconds(5)) // CPU가 포화된 인스턴스는 지표 응답도 느리다
+				.GET()
+				.build();
+		HttpResponse<String> response = http.send(request, HttpResponse.BodyHandlers.ofString());
+		if (response.statusCode() != 200) {
+			throw new IOException(name + " → HTTP " + response.statusCode());
+		}
+		JsonNode measurements = json.readTree(response.body()).path("measurements");
+		double value = measurements.isEmpty() ? 0 : measurements.get(0).path("value").asDouble();
+		return new MetricValue(response.headers().firstValue(SERVED_BY).orElse(baseUrl), value);
+	}
+
+	/** @param servedBy 지표를 돌려준 인스턴스 이름 */
+	public record MetricValue(String servedBy, double value) {
 	}
 
 	private IssueResponse parseIssue(String body) {

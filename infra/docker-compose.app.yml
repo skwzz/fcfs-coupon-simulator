@@ -1,0 +1,134 @@
+# 앱: nginx, coupon-api ×2, coupon-worker, simulator (실측 모드)
+# 인프라 파일과 함께 띄운다. 개발 모드로 띄운 앱(8080, 8090)은 먼저 내려야 포트가 겹치지 않는다.
+#   docker compose -f infra/docker-compose.yml -f infra/docker-compose.app.yml up -d --build --wait
+# 자원 제한 수치는 docs/02-architecture.md 7장
+
+x-backend-env: &backend-env
+  TZ: Asia/Seoul
+  DB_HOST: mysql
+  REDIS_HOST: redis
+  KAFKA_BOOTSTRAP_SERVERS: kafka:19092
+
+x-infra-ready: &infra-ready
+  mysql:
+    condition: service_healthy
+  redis:
+    condition: service_healthy
+  kafka:
+    condition: service_healthy
+
+# JRE 이미지에 curl이 없어서 bash의 /dev/tcp로 health 엔드포인트를 확인한다
+x-healthcheck: &healthcheck
+  test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/localhost/$${SERVER_PORT:-8080} && printf 'GET /actuator/health HTTP/1.0\\r\\n\\r\\n' >&3 && grep -q UP <&3"]
+  interval: 5s
+  timeout: 3s
+  retries: 30
+  start_period: 20s
+
+services:
+  coupon-api-1:
+    build:
+      context: ../backend
+      args:
+        MODULE: coupon-api
+    image: fcfs/coupon-api
+    restart: unless-stopped
+    environment:
+      <<: *backend-env
+      INSTANCE_ID: coupon-api-1
+      DB_POOL_SIZE: 10
+    healthcheck: *healthcheck
+    depends_on: *infra-ready
+    deploy:
+      resources:
+        limits:
+          cpus: "1"
+          memory: 512m
+
+  coupon-api-2:
+    image: fcfs/coupon-api
+    restart: unless-stopped
+    environment:
+      <<: *backend-env
+      INSTANCE_ID: coupon-api-2
+      DB_POOL_SIZE: 10
+    healthcheck: *healthcheck
+    # 같은 이미지를 쓰므로 1번이 빌드·기동된 뒤에 띄운다 (Flyway 마이그레이션도 1번이 먼저 끝냄)
+    depends_on:
+      coupon-api-1:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          cpus: "1"
+          memory: 512m
+
+  coupon-worker:
+    build:
+      context: ../backend
+      args:
+        MODULE: coupon-worker
+    image: fcfs/coupon-worker
+    restart: unless-stopped
+    environment:
+      <<: *backend-env
+      SERVER_PORT: 8082
+    healthcheck: *healthcheck
+    depends_on: *infra-ready
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 384m
+
+  nginx:
+    image: nginx:1.27
+    restart: unless-stopped
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+    ports:
+      - "8080:80"
+    ulimits:
+      nofile: 65535
+    healthcheck:
+      test: ["CMD", "curl", "-fs", "-o", "/dev/null", "http://localhost/actuator/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    depends_on:
+      coupon-api-1:
+        condition: service_healthy
+      coupon-api-2:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 128m
+
+  simulator:
+    build:
+      context: ../backend
+      args:
+        MODULE: simulator
+    image: fcfs/simulator
+    restart: unless-stopped
+    environment:
+      <<: *backend-env
+      SERVER_PORT: 8090
+      # 가상 사용자 요청은 nginx로 보내고, 서버 지표는 각 인스턴스에서 직접 읽는다
+      TARGET_BASE_URL: http://nginx
+      SERVER_METRICS_URLS: http://coupon-api-1:8080,http://coupon-api-2:8080
+    ports:
+      - "8090:8090"
+    healthcheck: *healthcheck
+    depends_on:
+      mysql:
+        condition: service_healthy
+      nginx:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          cpus: "2"
+          memory: 1g

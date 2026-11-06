@@ -33,11 +33,14 @@ public class SimulationService {
 	private final CouponApiClient api;
 	private final RunRepository repository;
 	private final SimulatorProperties props;
+	private final ServerMetricsCollector serverMetrics;
 	private final ScheduledExecutorService ticker = Executors.newSingleThreadScheduledExecutor(
 			Thread.ofPlatform().name("sim-ticker").daemon().factory());
 	private final Map<Long, SimulationRun> runs;
 
-	public SimulationService(CouponApiClient api, RunRepository repository, SimulatorProperties props) {
+	public SimulationService(CouponApiClient api, RunRepository repository, SimulatorProperties props,
+			ServerMetricsCollector serverMetrics) {
+		this.serverMetrics = serverMetrics;
 		this.api = api;
 		this.repository = repository;
 		this.props = props;
@@ -76,17 +79,12 @@ public class SimulationService {
 	}
 
 	private void execute(SimulationRun run) {
-		CountDownLatch startSignal = new CountDownLatch(1);
-		try (ExecutorService users = Executors.newVirtualThreadPerTaskExecutor()) {
-			run.users = users;
-			for (int i = 0; i < run.userCount; i++) {
-				int index = i;
-				users.submit(() -> runUser(run, index, startSignal));
-			}
-			// 모든 스레드가 준비된 뒤 한 번에 출발 (rampUpMs가 0이면 사실상 동시 요청)
-			run.markStarted();
-			startSignal.countDown();
-		} // close()가 모든 사용자가 끝날 때까지 기다린다
+		serverMetrics.acquire();
+		try {
+			runUsers(run);
+		} finally {
+			serverMetrics.release();
+		}
 
 		Verification verification = null;
 		String error = null;
@@ -98,6 +96,20 @@ public class SimulationService {
 		run.finish(run.stopRequested ? RunState.STOPPED : RunState.DONE, verification, error);
 		save(run);
 		log.info("simulation {} finished: {}", run.id, verification);
+	}
+
+	private void runUsers(SimulationRun run) {
+		CountDownLatch startSignal = new CountDownLatch(1);
+		try (ExecutorService users = Executors.newVirtualThreadPerTaskExecutor()) {
+			run.users = users;
+			for (int i = 0; i < run.userCount; i++) {
+				int index = i;
+				users.submit(() -> runUser(run, index, startSignal));
+			}
+			// 모든 스레드가 준비된 뒤 한 번에 출발 (rampUpMs가 0이면 사실상 동시 요청)
+			run.markStarted();
+			startSignal.countDown();
+		} // close()가 모든 사용자가 끝날 때까지 기다린다
 	}
 
 	/** ticker가 마지막 지표까지 보낸 뒤 결과를 DB에 남긴다. */
@@ -127,17 +139,17 @@ public class SimulationService {
 			run.requesting(i);
 			long t0 = System.nanoTime();
 			IssueOutcome outcome = api.issue(run.eventId, i + 1L, run.strategy);
-			run.complete(i, UserStatus.of(outcome.result()), outcome.reason(), System.nanoTime() - t0);
+			run.complete(i, UserStatus.of(outcome.result()), outcome.reason(), outcome.servedBy(), System.nanoTime() - t0);
 		} catch (InterruptedException e) {
 			if (run.statusOf(i) == UserStatus.REQUESTING) {
-				run.complete(i, UserStatus.ERROR, "STOPPED", -1);
+				run.complete(i, UserStatus.ERROR, "STOPPED", null, -1);
 			}
 		}
 	}
 
 	private void safeTick(SimulationRun run) {
 		try {
-			run.tick();
+			run.tick(serverMetrics.latest());
 		} catch (RuntimeException e) {
 			// 예외가 나면 scheduleAtFixedRate가 조용히 멈추므로 여기서 삼키고 남긴다
 			log.warn("tick failed for run {}", run.id, e);

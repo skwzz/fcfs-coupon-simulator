@@ -113,6 +113,7 @@ export function HistoryPage() {
                 <th className="pb-2">#</th>
                 <th className="pb-2">전략</th>
                 <th className="pb-2">행동</th>
+                <th className="pb-2">대상</th>
                 <th className="pb-2 text-right">사용자</th>
                 <th className="pb-2 text-right">재고</th>
                 <th className="pb-2 text-right">평균 TPS</th>
@@ -135,6 +136,9 @@ export function HistoryPage() {
                     {r.queueEnabled && <span className="ml-2 rounded bg-amber-500/15 px-1.5 py-0.5 text-[10px] text-amber-400">대기열</span>}
                   </td>
                   <td className="py-2 text-xs text-slate-400">{r.behaviorPreset}</td>
+                  <td className="py-2 text-xs text-slate-400" title={[r.targetBaseUrl, ...Object.entries(r.servedBy ?? {}).map(([k, v]) => `${k}: ${v}`)].join('\n')}>
+                    {modeLabel(r)}
+                  </td>
                   <td className="py-2 text-right tabular-nums">{fmt(r.userCount)}</td>
                   <td className="py-2 text-right tabular-nums">{fmt(r.stock)}</td>
                   <td className="py-2 text-right tabular-nums">{r.avgTps != null ? fmt(r.avgTps) : '-'}</td>
@@ -204,6 +208,14 @@ function StateBadge({ run }: { run: RunSummary }) {
       {stopped}
     </span>
   )
+}
+
+/** 요청 대상과 응답한 인스턴스 수로 개발 모드/실측 모드를 구분해서 보여준다 */
+function modeLabel(r: RunSummary) {
+  const instances = Object.keys(r.servedBy ?? {}).length
+  const host = r.targetBaseUrl.replace(/^https?:\/\//, '')
+  const mode = host.startsWith('nginx') ? '실측' : '개발'
+  return instances > 0 ? `${mode} · API ${instances}대` : mode
 }
 
 function formatTime(iso: string) {
