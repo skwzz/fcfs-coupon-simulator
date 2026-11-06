@@ -1,6 +1,10 @@
 # 개발 모드 기본값. 실측 모드(Docker)에서는 환경변수로 호스트를 바꾼다.
 server:
   port: ${SERVER_PORT:8080}
+  tomcat:
+    # 수천 명이 동시에 새 연결을 맺으면 기본 대기 큐(100)가 넘쳐서 연결 거부가 난다.
+    # 실무에서는 앞단 로드밸런서가 이 버스트를 받아 주므로, 개발 모드에서는 큐를 넉넉히 둔다.
+    accept-count: ${ACCEPT_COUNT:2000}
 
 spring:
   application:

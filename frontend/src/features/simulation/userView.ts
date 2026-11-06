@@ -1,5 +1,5 @@
 import type { QueueView } from '../../components/QueueScreen'
-import { S } from '../../mock/types'
+import { S } from '../../sim/types'
 
 // 가상 사용자의 현재 상태를 "그 사용자가 보는 화면"으로 변환
 export function toQueueView(status: number, rank: number, totalWaiting: number, admitPerSecond: number): QueueView {
@@ -20,11 +20,15 @@ export function toQueueView(status: number, rank: number, totalWaiting: number, 
       return { kind: 'admitted' }
     case S.ISSUED:
       return { kind: 'issued' }
+    case S.ACCEPTED:
+      return { kind: 'issued', note: 'DB 반영 대기 중' }
     case S.SOLD_OUT:
       return { kind: 'sold_out' }
     case S.DUPLICATE:
       return { kind: 'duplicate' }
+    case S.ABANDONED:
+      return { kind: 'error', reason: '대기 중 이탈' }
     default:
-      return { kind: 'error', reason: 'LOCK_TIMEOUT' }
+      return { kind: 'error' }
   }
 }

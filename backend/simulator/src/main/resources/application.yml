@@ -7,10 +7,21 @@ spring:
   threads:
     virtual:
       enabled: true
+  # simulator 전용 DB (coupon-api의 coupon DB와 분리). 만드는 스크립트는 infra/mysql/init
+  datasource:
+    url: jdbc:mysql://${DB_HOST:localhost}:3306/simulation?serverTimezone=Asia/Seoul&characterEncoding=UTF-8&rewriteBatchedStatements=true
+    username: coupon
+    password: coupon
+    hikari:
+      maximum-pool-size: 5
 
 simulator:
   # 가상 사용자가 요청을 보낼 곳. 개발 모드는 coupon-api 직접, 실측 모드는 nginx
   target-base-url: ${TARGET_BASE_URL:http://localhost:8080}
+  connect-timeout: 5s
+  request-timeout: 30s
+  # 실시간 상태(사용자 배열 등)를 메모리에 남겨 둘 최근 실행 수. 그보다 오래된 실행은 DB에서 조회한다
+  max-kept-runs: 20
 
 management:
   endpoints:
