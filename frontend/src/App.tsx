@@ -6,7 +6,7 @@ import { HealthDots } from './components/HealthDots'
 
 const TABS = [
   { key: 'simulation', label: '시뮬레이션' },
-  { key: 'live', label: '직접 참여', mock: true },
+  { key: 'live', label: '직접 참여' },
   { key: 'history', label: '실행 기록 / 비교' },
 ] as const
 
@@ -46,7 +46,7 @@ export default function App() {
           <SimulationPage />
         </div>
         <div hidden={tab !== 'live'}>
-          <LiveJoinPage />
+          <LiveJoinPage active={tab === 'live'} />
         </div>
         {/* 실행 기록은 들어올 때마다 새로 불러오도록 매번 다시 만든다 */}
         {tab === 'history' && <HistoryPage />}

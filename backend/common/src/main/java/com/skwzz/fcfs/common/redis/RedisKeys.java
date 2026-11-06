@@ -29,6 +29,19 @@ public final class RedisKeys {
 		return "queue:{" + eventId + "}:active";
 	}
 
+	/** 입장한 사용자의 입장 토큰 (Hash, userId → token). 만료돼도 남겨서 "만료"와 "들어온 적 없음"을 구분한다 */
+	public static String queueTokens(long eventId) {
+		return "queue:{" + eventId + "}:tokens";
+	}
+
+	/** 대기열 설정과 상태 (Hash: rate, ttl-ms, admitted-at, admitted, closed) */
+	public static String queueMeta(long eventId) {
+		return "queue:{" + eventId + "}:meta";
+	}
+
+	/** 입장 스케줄러가 돌아야 하는 이벤트 id (Set). 이벤트를 가로지르는 키라 해시태그가 없다 */
+	public static final String QUEUE_EVENTS = "queue:events";
+
 	/** 분산 락 전략용 */
 	public static String issueLock(long eventId) {
 		return "lock:coupon:{" + eventId + "}";

@@ -65,13 +65,20 @@ export interface BehaviorDetail {
   jitter: boolean
   /** 클라이언트가 응답을 기다리는 최대 시간 */
   timeoutMs: number
+  /** 대기 중 새로고침 (분당 평균). 새로고침하면 맨 뒤로 다시 선다 */
+  refreshPerMinute: number
+  /** 이 시간만큼 기다리면 절반이 떠난다. 0이면 이탈 없음 */
+  abandonMedianSec: number
+  /** 폴링 모드에서 순번 확인 간격과 흔들림 (±) */
+  pollIntervalMs: number
+  pollJitterMs: number
 }
 
 /** 프리셋 기본값 (simulator BehaviorModel.of와 같게 유지) */
 export const BEHAVIOR_PRESETS: Record<Behavior, BehaviorDetail> = {
-  IDEAL: { thinkMinMs: 0, thinkMaxMs: 0, multiClickRatio: 0, clicks: 1, maxRetries: 0, backoffMs: 0, jitter: false, timeoutMs: 30000 },
-  REALISTIC: { thinkMinMs: 0, thinkMaxMs: 300, multiClickRatio: 0.2, clicks: 3, maxRetries: 2, backoffMs: 500, jitter: true, timeoutMs: 10000 },
-  AGGRESSIVE: { thinkMinMs: 0, thinkMaxMs: 0, multiClickRatio: 0.5, clicks: 3, maxRetries: 3, backoffMs: 0, jitter: false, timeoutMs: 3000 },
+  IDEAL: { thinkMinMs: 0, thinkMaxMs: 0, multiClickRatio: 0, clicks: 1, maxRetries: 0, backoffMs: 0, jitter: false, timeoutMs: 30000, refreshPerMinute: 0, abandonMedianSec: 0, pollIntervalMs: 1000, pollJitterMs: 0 },
+  REALISTIC: { thinkMinMs: 0, thinkMaxMs: 300, multiClickRatio: 0.2, clicks: 3, maxRetries: 2, backoffMs: 500, jitter: true, timeoutMs: 10000, refreshPerMinute: 0.1, abandonMedianSec: 60, pollIntervalMs: 1000, pollJitterMs: 300 },
+  AGGRESSIVE: { thinkMinMs: 0, thinkMaxMs: 0, multiClickRatio: 0.5, clicks: 3, maxRetries: 3, backoffMs: 0, jitter: false, timeoutMs: 3000, refreshPerMinute: 0.5, abandonMedianSec: 0, pollIntervalMs: 1000, pollJitterMs: 300 },
 }
 
 /** DB 카운터(issued_quantity)로 재고를 세는 전략. Redis 전략은 카운터 대신 Redis 재고를 쓴다 */
@@ -132,6 +139,8 @@ export interface ServerSample {
   hikariPending: number
   /** 컨테이너에 할당된 CPU 기준 % */
   cpuPercent: number
+  /** 사용 중인 힙 MB (Phase 5부터, 이전 기록은 없음) */
+  heapUsedMb?: number | null
 }
 
 export interface UsersMsg {
@@ -168,6 +177,24 @@ export interface DoneMsg {
   responses: Record<string, number> | null
   /** 에러 사유별 응답 수 */
   errors: Record<string, number> | null
+  /** 대기열 지표 (대기열을 쓴 실행만) */
+  queue?: QueueStats | null
+}
+
+export interface QueueStats {
+  /** 줄 서기 요청 수 (새로고침으로 다시 선 것 포함) */
+  enters: number
+  /** 폴링 요청 수 (SSE 모드는 0) */
+  polls: number
+  refreshes: number
+  abandoned: number
+  admitted: number
+  /** 줄 서기·순번 확인 실패 수 */
+  errors: number
+  /** 줄 선 뒤 입장하기까지 */
+  waitMs: Latency
+  admitPerSecond: number
+  notifyMode: 'SSE' | 'POLLING'
 }
 
 export interface TimelineEntry {

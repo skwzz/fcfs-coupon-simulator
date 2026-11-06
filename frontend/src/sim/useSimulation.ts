@@ -147,12 +147,17 @@ export function useSimulation(config: SimConfig) {
           userCount: config.userCount,
           rampUpMs: config.rampUpMs,
           queueEnabled: config.queueEnabled,
+          admitPerSecond: config.queueEnabled ? config.admitPerSecond : undefined,
+          queueNotifyMode: config.queueEnabled ? config.notifyMode : undefined,
           behavior: {
             preset: config.behavior,
             thinkTimeMs: [config.behaviorDetail.thinkMinMs, config.behaviorDetail.thinkMaxMs],
             multiClick: { ratio: config.behaviorDetail.multiClickRatio, clicks: config.behaviorDetail.clicks },
             retry: { maxRetries: config.behaviorDetail.maxRetries, backoffMs: config.behaviorDetail.backoffMs, jitter: config.behaviorDetail.jitter },
             timeoutMs: config.behaviorDetail.timeoutMs,
+            refreshWhileWaiting: { ratePerMinute: config.behaviorDetail.refreshPerMinute },
+            abandon: { medianWaitSec: config.behaviorDetail.abandonMedianSec },
+            polling: { intervalMs: config.behaviorDetail.pollIntervalMs, jitterMs: config.behaviorDetail.pollJitterMs },
           },
         }),
       })

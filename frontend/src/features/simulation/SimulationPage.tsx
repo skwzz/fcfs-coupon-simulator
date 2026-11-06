@@ -43,6 +43,7 @@ export function SimulationPage() {
           rampUpMs: summary.rampUpMs,
           behavior: summary.behaviorPreset,
           behaviorDetail: BEHAVIOR_PRESETS[summary.behaviorPreset],
+          queueEnabled: summary.queueEnabled,
         }))
         attach(summary)
       })
@@ -107,17 +108,32 @@ export function SimulationPage() {
               preset={config.behavior}
               detail={config.behaviorDetail}
               disabled={busy}
+              queueEnabled={config.queueEnabled}
               onPreset={(p) => setConfig((c) => ({ ...c, behavior: p, behaviorDetail: BEHAVIOR_PRESETS[p] }))}
               onDetail={(d) => set('behaviorDetail', d)}
             />
 
-            <div className="rounded-lg border border-slate-800 p-3 opacity-60">
+            <div className="rounded-lg border border-slate-800 p-3">
               <label className="flex items-center justify-between text-sm">
-                <span>
-                  대기열 사용 <span className="text-xs text-slate-500">(Phase 5)</span>
-                </span>
-                <input type="checkbox" className="size-4 accent-sky-500" checked={false} disabled />
+                <span>대기열 사용</span>
+                <input type="checkbox" className="size-4 accent-sky-500" checked={config.queueEnabled} disabled={busy} onChange={(e) => set('queueEnabled', e.target.checked)} />
               </label>
+              {config.queueEnabled && (
+                <div className="mt-2 grid grid-cols-2 gap-2">
+                  <Field label="초당 입장">
+                    <input type="number" className={inputClass} value={config.admitPerSecond} disabled={busy} onChange={(e) => set('admitPerSecond', Math.min(100000, Math.max(1, +e.target.value)))} />
+                  </Field>
+                  <Field label="순번 알림">
+                    <select className={inputClass} value={config.notifyMode} disabled={busy} onChange={(e) => set('notifyMode', e.target.value as SimConfig['notifyMode'])}>
+                      <option value="SSE">SSE (push)</option>
+                      <option value="POLLING">폴링</option>
+                    </select>
+                  </Field>
+                  <p className="col-span-2 text-[11px] leading-4 text-slate-500">
+                    줄을 선 뒤 초당 {fmt(config.admitPerSecond)}명씩 입장하고, 입장 토큰이 있어야 발급을 요청할 수 있습니다. 재고가 떨어지면 기다리던 사용자에게 매진을 알립니다.
+                  </p>
+                </div>
+              )}
             </div>
 
             {run.error && <div className="rounded-md border border-rose-500/40 bg-rose-500/10 px-3 py-2 text-xs text-rose-300">{run.error}</div>}
@@ -160,12 +176,21 @@ export function SimulationPage() {
             sub={lastLatency ? `p50 ${fmt(Math.round(lastLatency.p50 ?? 0))} · p95 ${fmt(Math.round(lastLatency.p95 ?? 0))}` : '구간별 측정'}
             tone={(lastLatency?.p99 ?? 0) > 1000 ? 'warn' : 'default'}
           />
-          <Kpi
-            label="요청 중"
-            value={fmt(counts.REQUESTING)}
-            sub={last ? `누적 요청 ${fmt(last.requests)} · 재시도 ${fmt(last.retries)}` : '응답을 기다리는 사용자'}
-            tone={(last?.retries ?? 0) > 0 ? 'bad' : counts.REQUESTING > 0 ? 'warn' : 'default'}
-          />
+          {config.queueEnabled ? (
+            <Kpi
+              label="대기열"
+              value={fmt(counts.WAITING)}
+              sub={`요청 중 ${fmt(counts.REQUESTING)} · 이탈 ${fmt(counts.ABANDONED)} · 초당 ${fmt(config.admitPerSecond)}명 입장`}
+              tone={counts.WAITING > 0 ? 'warn' : 'default'}
+            />
+          ) : (
+            <Kpi
+              label="요청 중"
+              value={fmt(counts.REQUESTING)}
+              sub={last ? `누적 요청 ${fmt(last.requests)} · 재시도 ${fmt(last.retries)}` : '응답을 기다리는 사용자'}
+              tone={(last?.retries ?? 0) > 0 ? 'bad' : counts.REQUESTING > 0 ? 'warn' : 'default'}
+            />
+          )}
           <Kpi label="진행" value={`${Math.round((finished / run.userCount) * 100)}%`} sub={`${(elapsed / 1000).toFixed(1)}초 경과`} />
         </div>
 
@@ -300,6 +325,19 @@ function ResultBanner({ done, strategy }: { done: DoneMsg; strategy: Strategy })
             <div className="mt-1 text-xs text-amber-300">
               쿠폰은 발급됐지만 성공 응답을 받지 못한 사용자 {fmt(unconfirmedIssued(done))}명 — 클라이언트가 타임아웃으로 포기한 뒤 서버가 커밋했습니다.
               사용자 화면에는 에러로 보입니다.
+            </div>
+          )}
+          {done.queue && (
+            <div className="mt-2 text-xs text-slate-400">
+              대기열 ({done.queue.notifyMode === 'SSE' ? 'SSE' : '폴링'}, 초당 {fmt(done.queue.admitPerSecond)}명) · 줄 서기 {fmt(done.queue.enters)}건
+              {done.queue.polls > 0 && ` · 폴링 ${fmt(done.queue.polls)}건`} · 입장 {fmt(done.queue.admitted)}명 · 새로고침 {fmt(done.queue.refreshes)} · 이탈 {fmt(done.queue.abandoned)}
+              {done.queue.errors > 0 && <span className="text-rose-300"> · 대기열 요청 실패 {fmt(done.queue.errors)}</span>}
+              {done.queue.waitMs.p50 != null && (
+                <span>
+                  {' '}
+                  · 대기 시간 p50 {(done.queue.waitMs.p50 / 1000).toFixed(1)}초 · p99 {((done.queue.waitMs.p99 ?? 0) / 1000).toFixed(1)}초
+                </span>
+              )}
             </div>
           )}
           {done.responses && (

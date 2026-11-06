@@ -32,12 +32,19 @@ public final class Messages {
 			Map<String, ServerSample> server) {
 	}
 
-	/** coupon-api 인스턴스 하나의 서버 측 지표. cpuPercent는 컨테이너에 할당된 CPU 기준 */
-	public record ServerSample(int hikariActive, int hikariPending, double cpuPercent) {
+	/**
+	 * coupon-api 인스턴스 하나의 서버 측 지표. cpuPercent는 컨테이너에 할당된 CPU 기준.
+	 *
+	 * @param heapUsedMb 사용 중인 힙 (GC 전 쓰레기 포함). 대기열 SSE 연결이 메모리를 얼마나 쓰는지 본다
+	 *        (Phase 5부터. 이전 기록은 null)
+	 */
+	public record ServerSample(int hikariActive, int hikariPending, double cpuPercent, Integer heapUsedMb) {
 
 		ServerSample max(ServerSample other) {
 			return new ServerSample(Math.max(hikariActive, other.hikariActive),
-					Math.max(hikariPending, other.hikariPending), Math.max(cpuPercent, other.cpuPercent));
+					Math.max(hikariPending, other.hikariPending), Math.max(cpuPercent, other.cpuPercent),
+					heapUsedMb == null ? other.heapUsedMb
+							: other.heapUsedMb == null ? heapUsedMb : Math.max(heapUsedMb, other.heapUsedMb));
 		}
 	}
 
@@ -57,7 +64,22 @@ public final class Messages {
 	public record Done(RunState state, long durationMs, Map<UserStatus, Integer> counts, Verification verification,
 			Latency latencyMs, int avgTps, String error, Map<String, Long> servedBy,
 			Map<String, ServerSample> serverPeak, Integer requests, Integer retries, Map<String, Long> responses,
-			Map<String, Long> errors) {
+			Map<String, Long> errors, QueueStats queue) {
+	}
+
+	/**
+	 * 대기열 지표 (대기열을 쓰는 실행만).
+	 *
+	 * @param enters 줄 서기 요청 수 (새로고침으로 다시 선 것 포함)
+	 * @param polls 폴링 요청 수 (SSE 모드는 0)
+	 * @param refreshes 대기 중 새로고침 수
+	 * @param abandoned 기다리다 떠난 사용자 수
+	 * @param admitted 입장한 사용자 수
+	 * @param errors 줄 서기·폴링 요청 실패 수
+	 * @param waitMs 줄 선 뒤 입장하기까지 걸린 시간
+	 */
+	public record QueueStats(int enters, int polls, int refreshes, int abandoned, int admitted, int errors,
+			Latency waitMs, int admitPerSecond, String notifyMode) {
 	}
 
 	/** 실행 기록에 남기는 1초 단위 지표. hikariPending은 인스턴스 합계, retries는 누적 */

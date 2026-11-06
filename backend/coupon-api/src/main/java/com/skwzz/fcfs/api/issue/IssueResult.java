@@ -21,6 +21,11 @@ public record IssueResult(IssueStatus status, String reason) {
 		return new IssueResult(IssueStatus.SOLD_OUT, null);
 	}
 
+	/** 대기열을 쓰는 이벤트인데 입장 토큰이 없거나 만료됨 */
+	public static IssueResult notAdmitted() {
+		return new IssueResult(IssueStatus.NOT_ADMITTED, null);
+	}
+
 	public static IssueResult error(String reason) {
 		return new IssueResult(IssueStatus.ERROR, reason);
 	}

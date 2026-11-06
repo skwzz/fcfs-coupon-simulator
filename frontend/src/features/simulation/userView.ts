@@ -9,9 +9,10 @@ export function toQueueView(status: number, rank: number, totalWaiting: number, 
     case S.REQUESTING:
       return { kind: 'requesting' }
     case S.WAITING:
+      // rank는 내 순번(1부터). 화면에는 "내 앞에 rank - 1명"
       return {
         kind: 'waiting',
-        rank,
+        rank: Math.max(0, rank - 1),
         behind: Math.max(0, totalWaiting - rank),
         etaSec: Math.ceil(rank / admitPerSecond),
         progress: totalWaiting > 0 ? 1 - rank / totalWaiting : 0,

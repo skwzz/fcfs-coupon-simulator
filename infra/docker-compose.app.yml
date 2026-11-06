@@ -36,17 +36,23 @@ services:
     environment:
       <<: *backend-env
       INSTANCE_ID: coupon-api-1
+      ACCEPT_COUNT: 8192
       DB_POOL_SIZE: 10
-      # 힙은 제한의 50%. 나머지는 동시 연결 수천 개의 소켓 버퍼, Netty(Lettuce·Redisson) 직접 메모리, 메타스페이스 몫
-      JAVA_OPTS: -XX:MaxRAMPercentage=50
+      # 힙은 제한의 60%. 나머지는 동시 연결 수천 개의 소켓 버퍼, Netty(Lettuce·Redisson) 직접 메모리, 메타스페이스 몫
+      JAVA_OPTS: -XX:MaxRAMPercentage=60
     healthcheck: *healthcheck
+    # 커널의 연결 대기 큐. 기본값(4096)이 accept-count보다 작으면 그 값으로 잘린다.
+    # 1만 명이 몇 초 안에 SSE를 맺으면 큐가 넘쳐 nginx가 연결하지 못하고 504가 난다 (docs/06 Phase 5 결과)
+    sysctls:
+      net.core.somaxconn: 8192
     depends_on: *infra-ready
     deploy:
       resources:
         limits:
           cpus: "1"
-          # 512m에서는 Redisson 추가 후 메모리 한도에 붙어 처리량이 절반 이하로 떨어졌다 (docs/02 7장)
-          memory: 1g
+          # 512m에서는 Redisson 추가 후 메모리 한도에 붙어 처리량이 절반 이하로 떨어졌다 (docs/02 7장).
+          # 1g(힙 512m)에서는 대기열 SSE 5천 연결을 버티지 못하고 힙 OOM으로 죽었다 (docs/06 Phase 5 결과)
+          memory: 1536m
 
   coupon-api-2:
     image: fcfs/coupon-api
@@ -54,9 +60,14 @@ services:
     environment:
       <<: *backend-env
       INSTANCE_ID: coupon-api-2
+      ACCEPT_COUNT: 8192
       DB_POOL_SIZE: 10
-      JAVA_OPTS: -XX:MaxRAMPercentage=50
+      JAVA_OPTS: -XX:MaxRAMPercentage=60
     healthcheck: *healthcheck
+    # 커널의 연결 대기 큐. 기본값(4096)이 accept-count보다 작으면 그 값으로 잘린다.
+    # 1만 명이 몇 초 안에 SSE를 맺으면 큐가 넘쳐 nginx가 연결하지 못하고 504가 난다 (docs/06 Phase 5 결과)
+    sysctls:
+      net.core.somaxconn: 8192
     # 같은 이미지를 쓰므로 1번이 빌드·기동된 뒤에 띄운다 (Flyway 마이그레이션도 1번이 먼저 끝냄)
     depends_on:
       coupon-api-1:
@@ -65,7 +76,7 @@ services:
       resources:
         limits:
           cpus: "1"
-          memory: 1g
+          memory: 1536m
 
   coupon-worker:
     build:
@@ -94,6 +105,9 @@ services:
       - "8080:80"
     ulimits:
       nofile: 65535
+    # listen backlog(16384)이 실제로 적용되게 커널 연결 대기 큐도 같이 키운다
+    sysctls:
+      net.core.somaxconn: 16384
     healthcheck:
       test: ["CMD", "curl", "-fs", "-o", "/dev/null", "http://localhost/actuator/health"]
       interval: 5s

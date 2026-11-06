@@ -6,6 +6,7 @@ import com.skwzz.fcfs.simulator.client.CouponApiClient;
 import com.skwzz.fcfs.simulator.client.CouponApiException;
 import com.skwzz.fcfs.simulator.client.EventInfo;
 import com.skwzz.fcfs.simulator.client.IssueOutcome;
+import com.skwzz.fcfs.simulator.client.QueueResponse;
 import com.skwzz.fcfs.simulator.client.Verification;
 import java.io.IOException;
 import java.time.Duration;
@@ -72,18 +73,21 @@ public class SimulationService {
 		original.validateSupported();
 		SimulationRequest request = original.withResolvedBehavior();
 		EventInfo event = request.eventId() == null
-				? api.createEvent("sim " + request.strategy() + " " + Instant.now(), request.stock(), request.strategy())
+				? api.createEvent("sim " + request.strategy() + " " + Instant.now(), request.stock(), request.strategy(),
+						request.queued(), request.queued() ? request.admitRate() : null)
 				: api.resetEvent(request.eventId());
 		long runId = repository.insertRunning(event.id(), request, event.totalQuantity(), props.targetBaseUrl(),
 				Instant.now());
 
-		SimulationRun run = new SimulationRun(runId, event.id(), request, event.totalQuantity());
+		// 기존 이벤트를 다시 쓰면 대기열 여부는 요청이 아니라 이벤트 설정을 따른다
+		SimulationRun run = new SimulationRun(runId, event.id(), request, event.totalQuantity(), event.queueEnabled());
 		runs.put(runId, run);
 		run.ticker = ticker.scheduleAtFixedRate(() -> safeTick(run), SimulationRun.TICK_MS, SimulationRun.TICK_MS,
 				TimeUnit.MILLISECONDS);
 		Thread.ofVirtual().name("sim-run-" + runId).start(() -> execute(run));
-		log.info("simulation {} started: event={}, strategy={}, users={}, stock={}", runId, event.id(),
-				request.strategy(), request.userCount(), event.totalQuantity());
+		log.info("simulation {} started: event={}, strategy={}, users={}, stock={}, queue={}", runId, event.id(),
+				request.strategy(), request.userCount(), event.totalQuantity(),
+				event.queueEnabled() ? event.admitPerSecond() + "/s " + request.notifyMode() : "off");
 		return new Messages.Started(runId, event.id());
 	}
 
@@ -160,23 +164,225 @@ public class SimulationService {
 			if (run.stopRequested) {
 				return;
 			}
-			int clicks = run.behavior.clicksForUser();
-			UserStatus result = clicks == 1 ? runClick(run, i, 1) : runClicks(run, i, clicks);
-			run.userFinished(i, result);
+			if (run.queued) {
+				runQueued(run, i);
+				return;
+			}
+			run.userFinished(i, issue(run, i, null));
 		} catch (InterruptedException e) {
 			// 출발 전에 중단됨. 요청을 보낸 적이 없으므로 IDLE로 남긴다
 		}
 	}
 
+	/** 발급 버튼을 누른다 (연타면 여러 번). 대기열을 거쳤으면 입장 토큰을 같이 보낸다 */
+	private UserStatus issue(SimulationRun run, int i, String token) throws InterruptedException {
+		int clicks = run.behavior.clicksForUser();
+		return clicks == 1 ? runClick(run, i, 1, token) : runClicks(run, i, clicks, token);
+	}
+
+	// ---- 대기열 ----
+
+	private enum WaitResult {
+		ADMITTED, SOLD_OUT, ABANDON, REFRESH, REENTER, FAILED
+	}
+
+	/** 기다리는 동안 바뀌는 값 */
+	private static final class Waiting {
+		final long startNs = System.nanoTime();
+		final long patienceMs;
+		long nextRefreshNs;
+		String token;
+		int errors;
+
+		Waiting(BehaviorModel behavior) {
+			this.patienceMs = behavior.patienceMs();
+			scheduleRefresh(behavior);
+		}
+
+		void scheduleRefresh(BehaviorModel behavior) {
+			long ms = behavior.nextRefreshMs();
+			nextRefreshNs = ms == Long.MAX_VALUE ? Long.MAX_VALUE : System.nanoTime() + ms * 1_000_000;
+		}
+
+		boolean outOfPatience() {
+			return patienceMs != Long.MAX_VALUE && (System.nanoTime() - startNs) / 1_000_000 >= patienceMs;
+		}
+
+		boolean refreshDue() {
+			return System.nanoTime() >= nextRefreshNs;
+		}
+	}
+
+	/**
+	 * 대기열을 쓰는 이벤트의 사용자: 줄 서기 → 순번을 받으며 기다림(SSE 또는 폴링) → 입장하면 발급.
+	 * 기다리는 동안 새로고침하면 줄에서 나갔다가 맨 뒤로 다시 서고, 참을성이 다하면 떠난다(ABANDONED).
+	 * 줄 서기·폴링이 실패하면 발급과 같은 재시도 규칙(횟수, 백오프)을 따른다.
+	 */
+	private void runQueued(SimulationRun run, int i) {
+		long userId = i + 1L;
+		Duration timeout = Duration.ofMillis(run.behavior.timeoutMs());
+		Waiting w = new Waiting(run.behavior);
+		boolean refresh = false;
+		try {
+			while (true) {
+				QueueResponse q = api.enterQueue(run.eventId, userId, timeout);
+				if (q.is(QueueResponse.ERROR)) {
+					run.queueError(i, q.reason());
+					if (!backoffAfterError(run, w)) {
+						run.queueFinished(i, UserStatus.ERROR, "줄 서기 실패 · " + q.reason());
+						return;
+					}
+					continue;
+				}
+				run.queueEntered(i, q, refresh);
+				refresh = false;
+				WaitResult result = switch (q.status()) {
+					case QueueResponse.WAITING -> run.config.notifyMode() == SimulationRequest.NotifyMode.SSE
+							? waitBySse(run, i, w)
+							: waitByPolling(run, i, w);
+					case QueueResponse.ADMITTED -> admittedNow(w, q);
+					case QueueResponse.SOLD_OUT -> WaitResult.SOLD_OUT;
+					default -> WaitResult.REENTER; // 입장했지만 토큰 만료 등: 다시 줄을 선다
+				};
+				switch (result) {
+					case ADMITTED -> {
+						run.admitted(i, w.startNs);
+						run.userFinished(i, issue(run, i, w.token));
+						return;
+					}
+					case SOLD_OUT -> {
+						run.queueFinished(i, UserStatus.SOLD_OUT, "대기 중 매진 통지");
+						return;
+					}
+					case ABANDON -> {
+						api.leaveQueue(run.eventId, userId, timeout);
+						run.queueFinished(i, UserStatus.ABANDONED,
+								"대기 " + (System.nanoTime() - w.startNs) / 1_000_000_000 + "초 만에 이탈");
+						return;
+					}
+					case REFRESH -> {
+						// 새로고침: 대기열 키(세션)를 잃은 것처럼 나갔다가 다시 선다
+						api.leaveQueue(run.eventId, userId, timeout);
+						w.scheduleRefresh(run.behavior);
+						refresh = true;
+					}
+					case FAILED -> {
+						run.queueFinished(i, UserStatus.ERROR, "순번 확인 실패");
+						return;
+					}
+					case REENTER -> {
+						// 연결이 끊기거나 토큰이 만료됨: 다시 줄 서기 (이미 서 있으면 자리는 그대로)
+					}
+				}
+				if (run.stopRequested) {
+					run.queueFinished(i, UserStatus.ERROR, "중단됨");
+					return;
+				}
+			}
+		} catch (InterruptedException e) {
+			run.queueFinished(i, UserStatus.ERROR, "중단됨");
+		}
+	}
+
+	private static WaitResult admittedNow(Waiting w, QueueResponse q) {
+		w.token = q.token();
+		return WaitResult.ADMITTED;
+	}
+
+	/** 순번 SSE를 구독해서 서버가 보내 주는 상태를 기다린다. 이벤트가 올 때마다 새로고침·이탈할지 본다 */
+	private WaitResult waitBySse(SimulationRun run, int i, Waiting w) throws InterruptedException {
+		Duration timeout = Duration.ofMillis(run.behavior.timeoutMs());
+		try (CouponApiClient.QueueStream stream = api.queueStream(run.eventId, i + 1L, timeout)) {
+			for (QueueResponse s; (s = stream.next()) != null;) {
+				if (Thread.currentThread().isInterrupted()) {
+					throw new InterruptedException();
+				}
+				if (s.is(QueueResponse.ERROR)) {
+					run.queueError(i, s.reason());
+					return backoffAfterError(run, w) ? WaitResult.REENTER : WaitResult.FAILED;
+				}
+				WaitResult result = onStatus(run, i, w, s);
+				if (result != null) {
+					return result;
+				}
+			}
+		}
+		return WaitResult.REENTER; // 서버가 연결을 닫음 (SSE 유효 시간 초과)
+	}
+
+	/** 주기적으로 내 순번을 묻는다 */
+	private WaitResult waitByPolling(SimulationRun run, int i, Waiting w) throws InterruptedException {
+		Duration timeout = Duration.ofMillis(run.behavior.timeoutMs());
+		while (!run.stopRequested) {
+			Thread.sleep(run.behavior.pollDelayMs());
+			if (w.outOfPatience()) {
+				return WaitResult.ABANDON;
+			}
+			if (w.refreshDue()) {
+				return WaitResult.REFRESH;
+			}
+			QueueResponse s = api.queueStatus(run.eventId, i + 1L, timeout);
+			run.queuePolled();
+			if (s.is(QueueResponse.ERROR)) {
+				run.queueError(i, s.reason());
+				if (!backoffAfterError(run, w)) {
+					return WaitResult.FAILED;
+				}
+				continue;
+			}
+			w.errors = 0;
+			WaitResult result = onStatus(run, i, w, s);
+			if (result != null) {
+				return result;
+			}
+		}
+		throw new InterruptedException();
+	}
+
+	/** 상태 하나를 받았을 때. 계속 기다리면 null */
+	private static WaitResult onStatus(SimulationRun run, int i, Waiting w, QueueResponse s) {
+		switch (s.status()) {
+			case QueueResponse.WAITING -> run.rankUpdated(i, s.rank());
+			case QueueResponse.ADMITTED -> {
+				return admittedNow(w, s);
+			}
+			case QueueResponse.SOLD_OUT -> {
+				return WaitResult.SOLD_OUT;
+			}
+			default -> {
+				return WaitResult.REENTER;
+			}
+		}
+		if (w.outOfPatience()) {
+			return WaitResult.ABANDON;
+		}
+		if (w.refreshDue()) {
+			return WaitResult.REFRESH;
+		}
+		return null;
+	}
+
+	/** 줄 서기·순번 확인이 실패했을 때 재시도 규칙대로 기다린다. 재시도 횟수를 넘기면 false */
+	private static boolean backoffAfterError(SimulationRun run, Waiting w) throws InterruptedException {
+		w.errors++;
+		if (w.errors > run.behavior.maxRetries()) {
+			return false;
+		}
+		long backoff = run.behavior.backoff(w.errors);
+		// 백오프가 0인 행동(AGGRESSIVE)이라도 서버가 끊은 직후 바로 다시 붙으면 같은 실패를 반복하므로 최소 간격을 둔다
+		Thread.sleep(Math.max(backoff, 100));
+		return true;
+	}
+
 	/** 응답이 오기 전에 버튼을 여러 번 누른다. 클릭마다 요청 id가 다르다 (멱등 키로 막히지 않는 진짜 중복 요청). */
-	private UserStatus runClicks(SimulationRun run, int i, int clicks) throws InterruptedException {
+	private UserStatus runClicks(SimulationRun run, int i, int clicks, String token) throws InterruptedException {
 		List<Future<UserStatus>> results = new ArrayList<>(clicks);
 		try (ExecutorService clickThreads = Executors.newVirtualThreadPerTaskExecutor()) {
 			for (int k = 1; k <= clicks; k++) {
 				int click = k;
 				results.add(clickThreads.submit(() -> {
 					Thread.sleep((long) (click - 1) * BehaviorModel.CLICK_INTERVAL_MS);
-					return runClick(run, i, click);
+					return runClick(run, i, click, token);
 				}));
 			}
 		}
@@ -192,14 +398,14 @@ public class SimulationService {
 	}
 
 	/** 클릭 한 번. 에러면 같은 요청 id로 재시도한다. 중단되면 ERROR(STOPPED) */
-	private UserStatus runClick(SimulationRun run, int i, int click) {
+	private UserStatus runClick(SimulationRun run, int i, int click, String token) {
 		String requestId = UUID.randomUUID().toString();
 		Duration timeout = Duration.ofMillis(run.behavior.timeoutMs());
 		try {
 			for (int attempt = 1;; attempt++) {
 				run.requestSent(i, click, attempt);
 				long t0 = System.nanoTime();
-				IssueOutcome outcome = api.issue(run.eventId, i + 1L, run.strategy, requestId, timeout);
+				IssueOutcome outcome = api.issue(run.eventId, i + 1L, run.strategy, requestId, token, timeout);
 				long latency = System.nanoTime() - t0;
 				UserStatus status = UserStatus.of(outcome.result());
 				boolean retry = status == UserStatus.ERROR && attempt <= run.behavior.maxRetries() && !run.stopRequested;
@@ -279,7 +485,7 @@ public class SimulationService {
 					s.userCount(), s.state(), s.durationMs() == null ? 0 : s.durationMs())));
 			emitter.send(SseEmitter.event().name("users").data(new Messages.Users(repository.findUserRows(runId))));
 			Messages.Done done = repository.findDone(runId).orElseGet(() -> new Messages.Done(s.state(), 0, s.counts(),
-					null, s.latencyMs(), 0, s.error(), Map.of(), Map.of(), null, null, null, null));
+					null, s.latencyMs(), 0, s.error(), Map.of(), Map.of(), null, null, null, null, null));
 			emitter.send(SseEmitter.event().name("done").data(done));
 			emitter.complete();
 		} catch (IOException e) {
