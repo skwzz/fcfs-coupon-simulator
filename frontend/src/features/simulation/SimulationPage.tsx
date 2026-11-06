@@ -152,12 +152,7 @@ export function SimulationPage() {
       {/* 메인 영역 */}
       <div className="min-w-0 space-y-4">
         <div className="grid grid-cols-5 gap-3">
-          <Kpi
-            label="남은 재고"
-            value={`${fmt(last?.stockLeft ?? run.stock)} / ${fmt(run.stock)}`}
-            sub={`성공 응답 ${fmt(issued)}건`}
-            tone={issued > run.stock ? 'bad' : (last?.stockLeft ?? run.stock) === 0 ? 'warn' : 'default'}
-          />
+          <StockKpi done={run.done} stock={run.stock} stockLeft={last?.stockLeft ?? run.stock} issuedResponses={issued} />
           <Kpi label="TPS" value={fmt(last?.tps ?? 0)} sub="최근 1초 완료 요청 수" />
           <Kpi
             label="지연시간 p99"
@@ -231,7 +226,46 @@ export function SimulationPage() {
   )
 }
 
-const RESPONSE_LABEL: Record<string, string> = { ISSUED: '발급', ACCEPTED: '발급 확정', SOLD_OUT: '매진', DUPLICATE: '중복', NOT_ADMITTED: '입장 전', ERROR: '에러' }
+/**
+ * DB에는 발급됐지만 성공 응답을 받지 못한 사용자 수 (사용자 단위, 중복 발급 행은 뺀다).
+ * 클라이언트가 타임아웃으로 포기한 뒤에도 서버는 처리를 계속해 커밋하기 때문에 생긴다.
+ */
+function unconfirmedIssued(done: DoneMsg): number {
+  const v = done.verification
+  if (!v) return 0
+  const confirmed = (done.counts.ISSUED ?? 0) + (done.counts.ACCEPTED ?? 0)
+  return Math.max(0, v.issuedInDb - v.duplicateIssued - confirmed)
+}
+
+/**
+ * 실행 중에는 사용자가 받은 성공 응답으로 재고를 추정할 수밖에 없다 (서버를 매번 세지 않는다).
+ * 끝나면 정합성 검증에서 센 DB 발급 수로 바꾼다. 응답이 유실되면 두 값이 크게 달라진다.
+ */
+function StockKpi({ done, stock, stockLeft, issuedResponses }: { done: DoneMsg | null; stock: number; stockLeft: number; issuedResponses: number }) {
+  const v = done?.verification
+  if (!done || !v) {
+    return (
+      <Kpi
+        label="남은 재고 (응답 기준)"
+        value={`${fmt(stockLeft)} / ${fmt(stock)}`}
+        sub={`성공 응답 ${fmt(issuedResponses)}건`}
+        tone={issuedResponses > stock ? 'bad' : stockLeft === 0 ? 'warn' : 'default'}
+      />
+    )
+  }
+  const left = Math.max(0, v.totalQuantity - v.issuedInDb)
+  const lost = unconfirmedIssued(done)
+  return (
+    <Kpi
+      label="남은 재고 (DB 기준)"
+      value={`${fmt(left)} / ${fmt(v.totalQuantity)}`}
+      sub={lost > 0 ? `성공 응답 ${fmt(issuedResponses)}건 · 응답 못 받음 ${fmt(lost)}명` : `DB 발급 ${fmt(v.issuedInDb)}건 · 성공 응답 ${fmt(issuedResponses)}건`}
+      tone={v.overIssued > 0 ? 'bad' : lost > 0 || left === 0 ? 'warn' : 'default'}
+    />
+  )
+}
+
+const RESPONSE_LABEL: Record<string, string> ={ ISSUED: '발급', ACCEPTED: '발급 확정', SOLD_OUT: '매진', DUPLICATE: '중복', NOT_ADMITTED: '입장 전', ERROR: '에러' }
 
 function ResultBanner({ done, strategy }: { done: DoneMsg; strategy: Strategy }) {
   const v = done.verification
@@ -261,6 +295,12 @@ function ResultBanner({ done, strategy }: { done: DoneMsg; strategy: Strategy })
           )}
           {v && COUNTER_STRATEGIES.includes(strategy) && v.issuedQuantityCounter !== v.issuedInDb && (
             <div className="mt-1 text-xs text-slate-400">카운터와 실제 발급 행 수가 다릅니다. 동시에 읽은 값에 +1을 덮어써서 갱신이 사라졌기 때문입니다 (lost update).</div>
+          )}
+          {unconfirmedIssued(done) > 0 && (
+            <div className="mt-1 text-xs text-amber-300">
+              쿠폰은 발급됐지만 성공 응답을 받지 못한 사용자 {fmt(unconfirmedIssued(done))}명 — 클라이언트가 타임아웃으로 포기한 뒤 서버가 커밋했습니다.
+              사용자 화면에는 에러로 보입니다.
+            </div>
           )}
           {done.responses && (
             <div className="mt-2 text-xs text-slate-400">
